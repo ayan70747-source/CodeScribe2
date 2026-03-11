@@ -541,3 +541,241 @@ Not completed in this change set:
 - Commit: `d5f7706`
 - Branch: `main`
 - Repository: `https://github.com/tvbibayan/CodeScribe2.git`
+
+---
+
+## 13) Addendum - Platform Upgrade Wave 2 (`f8c8cc0`)
+
+This addendum captures the second major set of platform improvements made after the initial hardening pass.
+
+### 13.1 Scope (Wave 2)
+
+#### Files Updated
+- `.env.example`
+- `README.md`
+- `app.py`
+- `tests/test_app.py`
+
+#### High-Level Outcomes
+- Added role-aware authorization scaffolding (RBAC-ready session role)
+- Added brute-force protection with lockout thresholds
+- Added async analysis job API (`submit + poll`)
+- Added versioned API aliases under `/v1/*`
+- Added Prometheus-style metrics endpoint (`/metrics`)
+- Expanded automated tests to cover new platform behaviors
+
+---
+
+### 13.2 Login Lockout Protection
+
+#### Before
+```python
+if username == admin_username and check_password_hash(admin_password_hash, password):
+    session.permanent = True
+    session['user'] = username
+    return redirect(url_for('index'))
+return render_template('login.html', error='Invalid username or password')
+```
+
+#### After
+```python
+identity = _login_identity(username)
+
+if _is_locked(identity):
+    return render_template('login.html', error='Too many failed attempts. Please try again later.'), 429
+
+if username == admin_username and check_password_hash(admin_password_hash, password):
+    _clear_failed_login(identity)
+    session.permanent = True
+    session['user'] = username
+    session['role'] = admin_role
+    return redirect(url_for('index'))
+
+_record_failed_login(identity)
+return render_template('login.html', error='Invalid username or password')
+```
+
+#### Why
+- Reduces credential stuffing and repeated password-guess attempts.
+- Introduces configurable lockout controls for enterprise-style auth posture.
+
+---
+
+### 13.3 RBAC-Ready Role Guarding
+
+#### Before
+- Session tracked only authenticated username.
+- No role metadata or role-based restriction helper.
+
+#### After
+```python
+def role_required(*allowed_roles: str):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            role = session.get('role')
+            if role not in allowed_roles:
+                return jsonify({"error": "Forbidden. Insufficient role permissions."}), 403
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+```
+
+And role assignment on successful login:
+```python
+session['role'] = admin_role
+```
+
+#### Why
+- Creates a clean path for multi-role expansion (admin, reviewer, viewer).
+- Separates authentication (who you are) from authorization (what you can do).
+
+---
+
+### 13.4 Versioned API Surface (`/v1/*`)
+
+#### Before
+- Only unversioned endpoints (e.g., `/analyze-all`, `/refactor-code`).
+
+#### After
+Examples:
+```python
+@app.route('/analyze-all', methods=['POST'])
+@app.route('/v1/analyze-all', methods=['POST'])
+def analyze_all():
+    ...
+```
+
+Similar aliasing added for:
+- `/upload-zip` and `/v1/upload-zip`
+- `/refactor-code` and `/v1/refactor-code`
+- `/generate-test` and `/v1/generate-test`
+- `/live-metrics` and `/v1/live-metrics`
+
+#### Why
+- Enables API evolution without breaking existing clients.
+- Provides migration path for future contract changes.
+
+---
+
+### 13.5 Async Analysis Jobs API
+
+#### Before
+- Full analysis endpoint was synchronous only.
+
+#### After
+Job submission endpoint:
+```python
+@app.route('/v1/jobs/analyze', methods=['POST'])
+def create_analysis_job():
+    ...
+    return jsonify({
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/v1/jobs/{job_id}",
+    }), 202
+```
+
+Job polling endpoint:
+```python
+@app.route('/v1/jobs/<job_id>', methods=['GET'])
+def get_analysis_job(job_id: str):
+    ...
+```
+
+Background worker:
+```python
+worker = threading.Thread(
+    target=_execute_async_analysis,
+    args=(job_id, code, trace_input),
+    daemon=True,
+)
+worker.start()
+```
+
+#### Why
+- Prevents long-running analysis calls from blocking clients.
+- Improves UX and platform scalability for heavy AI operations.
+
+---
+
+### 13.6 Metrics Endpoint and Request Instrumentation
+
+#### Before
+- No aggregate request counters or endpoint latency gauges.
+
+#### After
+Metrics aggregation and tracking:
+```python
+def _track_metrics(endpoint: str, status_code: int, duration_ms: int) -> None:
+    ...
+```
+
+Prometheus-style endpoint:
+```python
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    ...
+    return "\n".join(lines) + "\n", 200, {"Content-Type": "text/plain; version=0.0.4"}
+```
+
+#### Why
+- Adds operations visibility for SRE workflows.
+- Supports alerting and performance trend analysis.
+
+---
+
+### 13.7 Shared Analysis Pipeline Refactor
+
+#### Before
+- Synchronous analysis logic duplicated directly inside route handler.
+
+#### After
+```python
+def run_analysis_pipeline(code: str, trace_input: str) -> dict[str, object]:
+    ...
+    return results
+```
+
+Used by:
+- sync route (`/analyze-all`)
+- async job execution worker (`/v1/jobs/analyze`)
+
+#### Why
+- Reduces logic duplication.
+- Keeps sync and async outputs consistent.
+
+---
+
+### 13.8 New Configuration Controls
+
+Added to `.env.example`:
+- `APP_ADMIN_ROLE=admin`
+- `MAX_FAILED_LOGINS=5`
+- `LOCKOUT_SECONDS=300`
+
+#### Why
+- Makes auth hardening and authorization defaults explicit and reproducible.
+
+---
+
+### 13.9 Testing Expansion
+
+`tests/test_app.py` now includes additional coverage for:
+- Versioned alias endpoint behavior (`/v1/live-metrics`)
+- Async job validation (`/v1/jobs/analyze` with missing code)
+- Metrics endpoint availability (`/metrics`)
+- Lockout behavior after repeated failed login attempts
+
+Validation run for this wave:
+- `pytest -q`
+- Result: `10 passed`
+
+---
+
+### 13.10 Wave 2 Metadata
+
+- Date: 2026-03-11
+- Commit: `f8c8cc0`
+- Branch: `main`
+- Repository: `https://github.com/tvbibayan/CodeScribe2.git`
