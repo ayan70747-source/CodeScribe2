@@ -141,8 +141,16 @@
             </section>
             <section class="panel panel-results">
                 <div class="panel-header">
-                    <h2 class="panel-title">Results Dashboard</h2>
-                    <p class="panel-subtitle">Navigate each slice of the analysis with the tabbed interface.</p>
+                    <div class="results-header-row">
+                        <div>
+                            <h2 class="panel-title">Results Dashboard</h2>
+                            <p class="panel-subtitle">Navigate each slice of the analysis with the tabbed interface.</p>
+                        </div>
+                        <div class="results-actions">
+                            <button id="export-markdown-button" class="dynamic-button" type="button">Export Markdown</button>
+                            <button id="export-json-button" class="dynamic-button" type="button">Export JSON</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="results-box tabbed-results">
                     <div class="tab-container" role="tablist" aria-label="Analysis results tabs">
@@ -164,12 +172,25 @@
                             <span class="result-chip">Topology</span>
                             <span class="result-caption">Call graph and dependency map</span>
                         </div>
+                        <div class="visualizer-toolbar" role="toolbar" aria-label="Visualizer controls">
+                            <button id="viz-zoom-out" class="dynamic-button" type="button">Zoom -</button>
+                            <button id="viz-zoom-reset" class="dynamic-button" type="button">Reset</button>
+                            <button id="viz-zoom-in" class="dynamic-button" type="button">Zoom +</button>
+                            <button id="viz-fullscreen" class="dynamic-button" type="button">Fullscreen</button>
+                        </div>
                         <div id="visualizer-output" class="tab-output">Run an analysis to see the call graph.</div>
                     </div>
                     <div id="audit-tab" class="tab-content" data-tab="audit" role="tabpanel" aria-labelledby="tab-audit">
                         <div class="result-card-header">
                             <span class="result-chip">Risk</span>
                             <span class="result-caption">Security findings and mitigation guidance</span>
+                        </div>
+                        <div class="audit-toolbar" role="toolbar" aria-label="Audit severity filters">
+                            <button class="dynamic-button audit-filter-button active" data-severity="all" type="button">All</button>
+                            <button class="dynamic-button audit-filter-button" data-severity="critical" type="button">Critical</button>
+                            <button class="dynamic-button audit-filter-button" data-severity="high" type="button">High</button>
+                            <button class="dynamic-button audit-filter-button" data-severity="medium" type="button">Medium</button>
+                            <button class="dynamic-button audit-filter-button" data-severity="low" type="button">Low</button>
                         </div>
                         <div id="audit-output" class="tab-output">Run an analysis to see potential vulnerabilities.</div>
                     </div>

@@ -29,6 +29,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const codeInput = document.getElementById('code-input');
     const traceInput = document.getElementById('trace-input');
     const loader = document.getElementById('loader');
+    const exportMarkdownButton = document.getElementById('export-markdown-button');
+    const exportJsonButton = document.getElementById('export-json-button');
+    const auditFilterButtons = document.querySelectorAll('.audit-filter-button');
+    const vizZoomInButton = document.getElementById('viz-zoom-in');
+    const vizZoomOutButton = document.getElementById('viz-zoom-out');
+    const vizZoomResetButton = document.getElementById('viz-zoom-reset');
+    const vizFullscreenButton = document.getElementById('viz-fullscreen');
 
     const docOutput = document.getElementById('doc-output');
     const auditOutput = document.getElementById('audit-output');
@@ -52,6 +59,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let complexityChart;
     let activeStep = 'input';
     const jobs = new Map();
+    let latestResults = null;
+    let visualizerZoom = 1;
 
     const sanitizeHtml = (html, options = {}) => {
         if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
@@ -74,6 +83,120 @@ document.addEventListener('DOMContentLoaded', () => {
         if (analysisFeedback) {
             analysisFeedback.textContent = message;
         }
+    };
+
+    const showStateCard = (element, kind, title, description) => {
+        if (!element) return;
+        const safeTitle = String(title || 'Status');
+        const safeDescription = String(description || '');
+        setSafeHtml(
+            element,
+            `<div class="status-state ${kind}"><strong>${safeTitle}</strong><p>${safeDescription}</p></div>`,
+            { USE_PROFILES: { html: true } },
+        );
+    };
+
+    const getVisualizerSvg = () => {
+        if (!visualizerOutput) return null;
+        return visualizerOutput.querySelector('svg');
+    };
+
+    const applyVisualizerZoom = () => {
+        const svg = getVisualizerSvg();
+        if (!svg) return;
+        svg.style.transform = `scale(${visualizerZoom})`;
+    };
+
+    const classifySeverity = (text) => {
+        if (!text) return null;
+        const normalized = text.toLowerCase();
+        if (normalized.includes('critical')) return 'critical';
+        if (normalized.includes('high')) return 'high';
+        if (normalized.includes('medium')) return 'medium';
+        if (normalized.includes('low')) return 'low';
+        return null;
+    };
+
+    const setAuditFilter = (severity) => {
+        const target = (severity || 'all').toLowerCase();
+        auditFilterButtons.forEach((button) => {
+            button.classList.toggle('active', button.dataset.severity === target);
+        });
+
+        const findings = auditOutput.querySelectorAll('.audit-finding-card');
+        findings.forEach((card) => {
+            const cardSeverity = (card.dataset.severity || '').toLowerCase();
+            card.style.display = target === 'all' || cardSeverity === target ? '' : 'none';
+        });
+    };
+
+    const structureAuditFindings = () => {
+        const candidates = auditOutput.querySelectorAll('li, p');
+        candidates.forEach((node) => {
+            if (node.closest('.audit-finding-card')) return;
+            const text = (node.textContent || '').trim();
+            const severity = classifySeverity(text);
+            if (!severity) return;
+
+            const card = document.createElement('div');
+            card.className = `audit-finding-card severity-${severity}`;
+            card.dataset.severity = severity;
+
+            const head = document.createElement('div');
+            head.className = 'finding-head';
+
+            const title = document.createElement('span');
+            title.className = 'finding-title';
+            title.textContent = text.slice(0, 140);
+
+            const pill = document.createElement('span');
+            pill.className = 'severity-pill';
+            pill.textContent = severity;
+
+            head.appendChild(title);
+            head.appendChild(pill);
+
+            const body = document.createElement('div');
+            body.className = 'finding-body';
+            body.appendChild(node.cloneNode(true));
+
+            card.appendChild(head);
+            card.appendChild(body);
+            node.replaceWith(card);
+        });
+
+        setAuditFilter('all');
+    };
+
+    const getMarkdownExport = () => {
+        if (!latestResults) return '';
+        return [
+            '# CodeScribe Analysis Export',
+            '',
+            '## Documentation',
+            latestResults.documentation || '_No documentation available._',
+            '',
+            '## Security Audit',
+            latestResults.audit || '_No audit available._',
+            '',
+            '## Live Trace',
+            latestResults.trace || '_No trace available._',
+            '',
+            '## Database Report',
+            latestResults.database_report || '_No database report available._',
+        ].join('\n');
+    };
+
+    const downloadTextFile = (filename, content, mimeType) => {
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
     };
 
     const setWorkflowStep = (step) => {
@@ -144,11 +267,13 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const applyAnalysisPayload = async (payload, fallbackTraceMessage) => {
+        latestResults = payload;
         renderMarkdown(docOutput, payload.documentation, 'No documentation generated.');
         renderMarkdown(auditOutput, payload.audit, 'No security findings reported.');
         renderMarkdown(traceOutput, payload.trace, fallbackTraceMessage || 'No live trace explanation available.');
         await renderVisualizer(payload.visualizer);
         renderMarkdown(databaseOutput, payload.database_report, 'No database report available.');
+        structureAuditFindings();
         injectDocumentationActions();
         injectAuditActions();
         setActiveTab('doc');
@@ -411,6 +536,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 setSafeHtml(visualizerOutput, svg, {
                     USE_PROFILES: { svg: true, svgFilters: true },
                 });
+                applyVisualizerZoom();
                 return;
             } catch (error) {
                 console.error('Mermaid render error:', error);
@@ -422,6 +548,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 setSafeHtml(visualizerOutput, graphvizSvg, {
                     USE_PROFILES: { svg: true, svgFilters: true },
                 });
+                applyVisualizerZoom();
             } else {
                 visualizerOutput.textContent = graphvizSvg;
             }
@@ -442,6 +569,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 setSafeHtml(visualizerOutput, svg, {
                     USE_PROFILES: { svg: true, svgFilters: true },
                 });
+                applyVisualizerZoom();
             } catch (error) {
                 console.error('Project mermaid render error:', error);
                 visualizerOutput.textContent = 'Project graph available but rendering failed.';
@@ -536,7 +664,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const injectAuditActions = () => {
         const severityKeywords = ['Critical', 'High', 'Medium', 'Low'];
-        const candidates = auditOutput.querySelectorAll('li, p, div');
+        const candidates = auditOutput.querySelectorAll('li, p, .finding-body');
         candidates.forEach((node) => {
             if (node.querySelector('.refactor-button')) return;
             const text = node.textContent || '';
@@ -591,7 +719,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const traceSnippet = traceInput.value.trim();
 
         if (!code) {
-            docOutput.textContent = 'Please paste some code first.';
+            showStateCard(docOutput, 'empty', 'No source code detected', 'Paste code in the editor to begin analysis.');
             setActiveTab('doc');
             setFeedback('Add source code before starting analysis.');
             return;
@@ -602,11 +730,11 @@ document.addEventListener('DOMContentLoaded', () => {
         setFeedback('Running synchronous analysis...');
         clearDynamicButtons();
 
-        docOutput.textContent = 'Generating documentation...';
-        auditOutput.textContent = 'Assessing security posture...';
-        traceOutput.textContent = traceSnippet ? 'Tracing execution...' : 'Add an invocation snippet to generate a live trace.';
-        visualizerOutput.textContent = 'Building call graph...';
-        databaseOutput.textContent = 'Scanning for SQL queries...';
+        showStateCard(docOutput, 'loading', 'Generating documentation', 'The model is drafting a full technical summary.');
+        showStateCard(auditOutput, 'loading', 'Assessing security posture', 'Scanning for vulnerabilities and debt markers.');
+        showStateCard(traceOutput, 'loading', 'Building runtime trace', traceSnippet ? 'Executing your trace snippet safely.' : 'Waiting for optional trace input.');
+        showStateCard(visualizerOutput, 'loading', 'Building call graph', 'Preparing architecture visualization output.');
+        showStateCard(databaseOutput, 'loading', 'Scanning SQL patterns', 'Checking query performance and safety hints.');
 
         try {
             const { response, payload } = await fetchJsonWithTimeout('/analyze-all', {
@@ -619,11 +747,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!response.ok) {
                 const message = payload.error || 'The server returned an error.';
-                docOutput.textContent = `Error: ${message}`;
-                auditOutput.textContent = '';
-                traceOutput.textContent = '';
-                visualizerOutput.textContent = '';
-                databaseOutput.textContent = '';
+                showStateCard(docOutput, 'error', 'Analysis failed', message);
+                showStateCard(auditOutput, 'empty', 'No audit output', 'No security analysis was returned.');
+                showStateCard(traceOutput, 'empty', 'No trace output', 'No runtime narrative was returned.');
+                showStateCard(visualizerOutput, 'empty', 'No visualizer output', 'No graph was returned.');
+                showStateCard(databaseOutput, 'empty', 'No database output', 'No SQL analysis was returned.');
                 setActiveTab('doc');
                 return;
             }
@@ -634,11 +762,11 @@ document.addEventListener('DOMContentLoaded', () => {
             setWorkflowStep('review');
         } catch (error) {
             console.error('Fetch Error:', error);
-            docOutput.textContent = 'An error occurred. Check the console (F12) for details.';
-            auditOutput.textContent = '';
-            traceOutput.textContent = '';
-            visualizerOutput.textContent = '';
-            databaseOutput.textContent = '';
+            showStateCard(docOutput, 'error', 'An error occurred', 'Check console logs and retry.');
+            showStateCard(auditOutput, 'empty', 'No audit output', 'No content available.');
+            showStateCard(traceOutput, 'empty', 'No trace output', 'No content available.');
+            showStateCard(visualizerOutput, 'empty', 'No visualizer output', 'No content available.');
+            showStateCard(databaseOutput, 'empty', 'No database output', 'No content available.');
             setActiveTab('doc');
             setFeedback('Analysis failed. Check your input and retry.');
         } finally {
@@ -711,6 +839,65 @@ document.addEventListener('DOMContentLoaded', () => {
             setFeedback('Job statuses updated.');
         });
     }
+
+    auditFilterButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            setAuditFilter(button.dataset.severity || 'all');
+        });
+    });
+
+    const updateFullscreenButtonLabel = () => {
+        if (!vizFullscreenButton) return;
+        vizFullscreenButton.textContent = document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen';
+    };
+
+    document.addEventListener('fullscreenchange', updateFullscreenButtonLabel);
+
+    vizZoomInButton?.addEventListener('click', () => {
+        visualizerZoom = Math.min(3, visualizerZoom + 0.2);
+        applyVisualizerZoom();
+    });
+
+    vizZoomOutButton?.addEventListener('click', () => {
+        visualizerZoom = Math.max(0.4, visualizerZoom - 0.2);
+        applyVisualizerZoom();
+    });
+
+    vizZoomResetButton?.addEventListener('click', () => {
+        visualizerZoom = 1;
+        applyVisualizerZoom();
+    });
+
+    vizFullscreenButton?.addEventListener('click', async () => {
+        try {
+            if (document.fullscreenElement) {
+                await document.exitFullscreen();
+            } else {
+                await visualizerOutput.requestFullscreen();
+            }
+            updateFullscreenButtonLabel();
+        } catch (error) {
+            console.error('Fullscreen toggle failed:', error);
+        }
+    });
+
+    exportMarkdownButton?.addEventListener('click', () => {
+        if (!latestResults) {
+            setFeedback('Run an analysis before exporting.');
+            return;
+        }
+        downloadTextFile('codescribe-report.md', getMarkdownExport(), 'text/markdown;charset=utf-8');
+        setFeedback('Markdown export downloaded.');
+    });
+
+    exportJsonButton?.addEventListener('click', () => {
+        if (!latestResults) {
+            setFeedback('Run an analysis before exporting.');
+            return;
+        }
+        downloadTextFile('codescribe-report.json', JSON.stringify(latestResults, null, 2), 'application/json;charset=utf-8');
+        setFeedback('JSON export downloaded.');
+    });
 
     const refreshLiveMetrics = (metrics, sourceCode) => {
         if (!metrics) {
@@ -786,8 +973,16 @@ document.addEventListener('DOMContentLoaded', () => {
             renderMarkdown(auditOutput, payload.project_security, 'No project security report available.');
             await renderVisualizer(payload.visualizer);
             renderMarkdown(databaseOutput, payload.database_report, 'No database report available.');
+            structureAuditFindings();
             traceOutput.textContent = 'Project uploads do not run live trace sessions.';
             lastSubmittedCode = '';
+            latestResults = {
+                documentation: payload.project_summary,
+                audit: payload.project_security,
+                trace: 'Project uploads do not run live trace sessions.',
+                database_report: payload.database_report,
+                visualizer: payload.visualizer,
+            };
             if (typeof payload.file_count === 'number') {
                 setUploadStatus(`Analyzed ${payload.file_count} Python files.`);
             } else {
