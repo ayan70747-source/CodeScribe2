@@ -9,6 +9,7 @@ It uses Google Gemini for code analysis and Markdown documentation generation.
 import ast
 import io
 import logging
+import json
 import os
 import re
 import secrets
@@ -191,6 +192,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
 
 admin_username = os.getenv('APP_ADMIN_USERNAME')
 admin_password_hash = os.getenv('APP_ADMIN_PASSWORD_HASH')
+admin_role = os.getenv('APP_ADMIN_ROLE', 'admin')
 if not admin_username or not admin_password_hash:
     raise ValueError('APP_ADMIN_USERNAME and APP_ADMIN_PASSWORD_HASH are required in the environment.')
 
@@ -202,6 +204,20 @@ cors_allowed_origins = {
 
 rate_limit_lock = threading.Lock()
 request_windows: dict[str, deque[float]] = defaultdict(deque)
+failed_login_lock = threading.Lock()
+failed_logins: dict[str, dict[str, float | int]] = defaultdict(lambda: {"count": 0, "locked_until": 0.0})
+
+MAX_FAILED_LOGINS = int(os.getenv('MAX_FAILED_LOGINS', '5'))
+LOCKOUT_SECONDS = int(os.getenv('LOCKOUT_SECONDS', '300'))
+
+job_lock = threading.Lock()
+analysis_jobs: dict[str, dict[str, object]] = {}
+
+metrics_lock = threading.Lock()
+metrics_store: dict[str, object] = {
+    "requests_total": defaultdict(int),
+    "endpoint_latency_ms": defaultdict(lambda: {"count": 0, "sum": 0.0, "max": 0.0}),
+}
 
 
 def rate_limit(max_requests: int, window_seconds: int):
@@ -240,6 +256,77 @@ def login_required(func):
         return func(*args, **kwargs)
 
     return wrapper
+
+
+def role_required(*allowed_roles: str):
+    """Restrict a route to users with a permitted role."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            role = session.get('role')
+            if role not in allowed_roles:
+                return jsonify({"error": "Forbidden. Insufficient role permissions."}), 403
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def _client_identity() -> str:
+    """Get a stable client fingerprint from proxy-aware headers."""
+    return request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown').split(',')[0].strip()
+
+
+def _login_identity(username: str) -> str:
+    """Build a login-attempt key to enforce lockout per user + client."""
+    return f"{username.lower()}::{_client_identity()}"
+
+
+def _is_locked(identity: str) -> bool:
+    """Return True if the identity is currently locked out."""
+    now = time.time()
+    with failed_login_lock:
+        record = failed_logins[identity]
+        locked_until = float(record.get("locked_until", 0.0))
+        if locked_until <= now:
+            record["locked_until"] = 0.0
+            if int(record.get("count", 0)) < MAX_FAILED_LOGINS:
+                return False
+        return locked_until > now
+
+
+def _record_failed_login(identity: str) -> int:
+    """Increment failed login count and apply lockout when threshold is reached."""
+    now = time.time()
+    with failed_login_lock:
+        record = failed_logins[identity]
+        count = int(record.get("count", 0)) + 1
+        record["count"] = count
+        if count >= MAX_FAILED_LOGINS:
+            record["locked_until"] = now + LOCKOUT_SECONDS
+        return count
+
+
+def _clear_failed_login(identity: str) -> None:
+    """Reset failed login tracking on successful authentication."""
+    with failed_login_lock:
+        failed_logins.pop(identity, None)
+
+
+def _track_metrics(endpoint: str, status_code: int, duration_ms: int) -> None:
+    """Capture request counters and latency stats for diagnostics."""
+    status_family = f"{status_code // 100}xx"
+    counter_key = f"{endpoint}|{status_family}"
+    with metrics_lock:
+        request_counters: defaultdict[str, int] = metrics_store["requests_total"]  # type: ignore[assignment]
+        latency_map: defaultdict[str, dict[str, float]] = metrics_store["endpoint_latency_ms"]  # type: ignore[assignment]
+        request_counters[counter_key] += 1
+        entry = latency_map[endpoint]
+        entry["count"] += 1
+        entry["sum"] += float(duration_ms)
+        entry["max"] = max(entry["max"], float(duration_ms))
 
 
 def generate_csrf_token() -> str:
@@ -770,6 +857,61 @@ def get_live_trace_explanation(code_str: str, trace_input: str) -> str:
     return response.text
 
 
+def run_analysis_pipeline(code: str, trace_input: str) -> dict[str, object]:
+    """Run the full analysis pipeline and return the unified response payload."""
+    results: dict[str, object] = {}
+
+    try:
+        results['documentation'] = get_ai_documentation(code)
+    except Exception as exc:
+        results['documentation'] = f"Documentation generation failed: {exc}"
+
+    try:
+        results['audit'] = get_ai_security_audit(code)
+    except Exception as exc:
+        results['audit'] = f"Security audit failed: {exc}"
+
+    results['visualizer'] = generate_visualizer_graph(code)
+
+    if trace_input:
+        try:
+            results['trace'] = get_live_trace_explanation(code, trace_input)
+        except Exception as exc:
+            results['trace'] = f"Live trace explanation failed: {exc}"
+    else:
+        results['trace'] = "Please provide a sample input to run the Live Trace."
+
+    sql_queries = extract_sql_queries(code)
+    if sql_queries:
+        try:
+            results['database_report'] = get_ai_database_report(sql_queries)
+        except Exception as exc:
+            results['database_report'] = f"Database analysis failed: {exc}"
+    else:
+        results['database_report'] = "No SQL queries detected in the provided code."
+
+    return results
+
+
+def _execute_async_analysis(job_id: str, code: str, trace_input: str) -> None:
+    """Background worker that computes analysis results for a job id."""
+    with job_lock:
+        analysis_jobs[job_id]["status"] = "running"
+        analysis_jobs[job_id]["started_at"] = time.time()
+    try:
+        payload = run_analysis_pipeline(code, trace_input)
+        with job_lock:
+            analysis_jobs[job_id]["status"] = "completed"
+            analysis_jobs[job_id]["result"] = payload
+            analysis_jobs[job_id]["finished_at"] = time.time()
+    except Exception as exc:
+        logger.exception("Async analysis failed")
+        with job_lock:
+            analysis_jobs[job_id]["status"] = "failed"
+            analysis_jobs[job_id]["error"] = str(exc)
+            analysis_jobs[job_id]["finished_at"] = time.time()
+
+
 @app.route('/healthz')
 def healthz():
     """Return process liveness for infrastructure checks."""
@@ -794,6 +936,7 @@ def about():
 
 
 @app.route('/analyze-all', methods=['POST'])
+@app.route('/v1/analyze-all', methods=['POST'])
 @login_required
 @rate_limit(max_requests=15, window_seconds=60)
 def analyze_all():
@@ -806,44 +949,60 @@ def analyze_all():
         if not code:
             return jsonify({"error": "No code provided"}), 400
 
-        results: dict[str, object] = {}
-
-        try:
-            results['documentation'] = get_ai_documentation(code)
-        except Exception as exc:
-            results['documentation'] = f"Documentation generation failed: {exc}"
-
-        try:
-            results['audit'] = get_ai_security_audit(code)
-        except Exception as exc:
-            results['audit'] = f"Security audit failed: {exc}"
-
-        results['visualizer'] = generate_visualizer_graph(code)
-
-        if trace_input:
-            try:
-                results['trace'] = get_live_trace_explanation(code, trace_input)
-            except Exception as exc:
-                results['trace'] = f"Live trace explanation failed: {exc}"
-        else:
-            results['trace'] = "Please provide a sample input to run the Live Trace."
-
-        sql_queries = extract_sql_queries(code)
-        if sql_queries:
-            try:
-                results['database_report'] = get_ai_database_report(sql_queries)
-            except Exception as exc:
-                results['database_report'] = f"Database analysis failed: {exc}"
-        else:
-            results['database_report'] = "No SQL queries detected in the provided code."
-
+        results = run_analysis_pipeline(code, trace_input)
         return jsonify(results)
     except Exception:
         logger.exception("Analyze-all failed")
         return jsonify({"error": "An internal error occurred."}), 500
 
 
+@app.route('/v1/jobs/analyze', methods=['POST'])
+@login_required
+@rate_limit(max_requests=15, window_seconds=60)
+def create_analysis_job():
+    """Queue a full analysis run and return a status endpoint."""
+    data = request.get_json() or {}
+    code = (data.get('code') or '').strip()
+    trace_input = (data.get('trace_input') or '').strip()
+    if not code:
+        return jsonify({"error": "No code provided"}), 400
+
+    job_id = secrets.token_hex(12)
+    with job_lock:
+        analysis_jobs[job_id] = {
+            "status": "queued",
+            "submitted_at": time.time(),
+            "submitted_by": session.get('user', 'unknown'),
+        }
+
+    worker = threading.Thread(
+        target=_execute_async_analysis,
+        args=(job_id, code, trace_input),
+        daemon=True,
+    )
+    worker.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/v1/jobs/{job_id}",
+    }), 202
+
+
+@app.route('/v1/jobs/<job_id>', methods=['GET'])
+@login_required
+def get_analysis_job(job_id: str):
+    """Return status or result for an asynchronous analysis job."""
+    with job_lock:
+        job = analysis_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        payload = dict(job)
+    return jsonify(payload)
+
+
 @app.route('/upload-zip', methods=['POST'])
+@app.route('/v1/upload-zip', methods=['POST'])
 @login_required
 @rate_limit(max_requests=6, window_seconds=60)
 def upload_zip_endpoint():
@@ -920,6 +1079,7 @@ def upload_zip_endpoint():
 
 
 @app.route('/refactor-code', methods=['POST'])
+@app.route('/v1/refactor-code', methods=['POST'])
 @login_required
 @rate_limit(max_requests=10, window_seconds=60)
 def refactor_code():
@@ -946,6 +1106,7 @@ def refactor_code():
 
 
 @app.route('/generate-test', methods=['POST'])
+@app.route('/v1/generate-test', methods=['POST'])
 @login_required
 @rate_limit(max_requests=10, window_seconds=60)
 def generate_test():
@@ -974,6 +1135,7 @@ def generate_test():
 
 
 @app.route('/live-metrics', methods=['POST'])
+@app.route('/v1/live-metrics', methods=['POST'])
 @login_required
 @rate_limit(max_requests=60, window_seconds=60)
 def live_metrics():
@@ -1052,7 +1214,54 @@ def after_request(response):
         "base-uri 'self'; "
         "frame-ancestors 'none';"
     )
+    endpoint = request.endpoint or request.path
+    _track_metrics(endpoint, response.status_code, max(duration_ms, 0))
+    logger.info(
+        json.dumps({
+            "event": "request_complete",
+            "method": request.method,
+            "path": request.path,
+            "endpoint": endpoint,
+            "status_code": response.status_code,
+            "duration_ms": max(duration_ms, 0),
+            "user": session.get('user', 'anonymous'),
+        })
+    )
     return response
+
+
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    """Expose lightweight Prometheus-style metrics for operational visibility."""
+    lines: list[str] = [
+        "# HELP codescribe_requests_total Total HTTP requests by endpoint and status family.",
+        "# TYPE codescribe_requests_total counter",
+    ]
+    with metrics_lock:
+        request_counters: defaultdict[str, int] = metrics_store["requests_total"]  # type: ignore[assignment]
+        latency_map: defaultdict[str, dict[str, float]] = metrics_store["endpoint_latency_ms"]  # type: ignore[assignment]
+        for key, count in sorted(request_counters.items()):
+            endpoint, status_family = key.split('|', 1)
+            safe_endpoint = endpoint.replace('"', "'")
+            lines.append(
+                f'codescribe_requests_total{{endpoint="{safe_endpoint}",status_family="{status_family}"}} {count}'
+            )
+
+        lines.append("# HELP codescribe_endpoint_latency_ms_avg Average endpoint latency in milliseconds.")
+        lines.append("# TYPE codescribe_endpoint_latency_ms_avg gauge")
+        for endpoint, stat in sorted(latency_map.items()):
+            count = float(stat["count"])
+            avg = float(stat["sum"]) / count if count else 0.0
+            safe_endpoint = endpoint.replace('"', "'")
+            lines.append(f'codescribe_endpoint_latency_ms_avg{{endpoint="{safe_endpoint}"}} {avg:.2f}')
+
+        lines.append("# HELP codescribe_endpoint_latency_ms_max Max endpoint latency in milliseconds.")
+        lines.append("# TYPE codescribe_endpoint_latency_ms_max gauge")
+        for endpoint, stat in sorted(latency_map.items()):
+            safe_endpoint = endpoint.replace('"', "'")
+            lines.append(f'codescribe_endpoint_latency_ms_max{{endpoint="{safe_endpoint}"}} {float(stat["max"]):.2f}')
+
+    return "\n".join(lines) + "\n", 200, {"Content-Type": "text/plain; version=0.0.4"}
 
 # --- Authentication Routes ---
 
@@ -1065,11 +1274,19 @@ def login():
 
         username = (request.form.get('username') or '').strip()
         password = request.form.get('password') or ''
+        identity = _login_identity(username)
+
+        if _is_locked(identity):
+            return render_template('login.html', error='Too many failed attempts. Please try again later.'), 429
 
         if username == admin_username and check_password_hash(admin_password_hash, password):
+            _clear_failed_login(identity)
             session.permanent = True
             session['user'] = username
+            session['role'] = admin_role
             return redirect(url_for('index'))
+
+        _record_failed_login(identity)
         return render_template('login.html', error='Invalid username or password')
     
     return render_template('login.html')
@@ -1085,6 +1302,8 @@ def settings():
     """Handle user settings"""
     if 'user' not in session:
         return redirect(url_for('login'))
+    if session.get('role') != 'admin':
+        return render_template('settings.html', message='Access denied. Admin role required.', temperature='0.3', api_key=''), 403
 
     if request.method == 'POST':
         if not validate_csrf_token():

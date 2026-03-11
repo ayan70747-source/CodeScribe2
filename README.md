@@ -19,6 +19,9 @@ CodeScribe is a web application that uses Google Gemini AI to automatically gene
 - **User Authentication** - Login system with session management
 - **Security Baseline** - CSRF-protected forms, CSP headers, request IDs, rate limits, and origin allowlist CORS
 - **Health Endpoints** - Liveness and readiness checks for deployment platforms
+- **Versioned APIs** - Backward-compatible `/v1/*` API route aliases
+- **Async Jobs API** - Non-blocking analysis job creation and status polling
+- **Operational Metrics** - Prometheus-style `/metrics` endpoint
 - **Settings Management** - Configure model parameters (API keys remain environment-managed)
 
 ## Quick Start
@@ -102,11 +105,19 @@ codeScribe2/
 | `/settings` | GET/POST | User settings management |
 | `/about` | GET | About page |
 | `/analyze-all` | POST | Full code analysis (docs, audit, graph, trace) |
+| `/v1/analyze-all` | POST | Versioned alias for full code analysis |
 | `/upload-zip` | POST | Project-wide analysis from ZIP upload |
+| `/v1/upload-zip` | POST | Versioned alias for project upload |
 | `/refactor-code` | POST | AI-assisted code refactoring |
+| `/v1/refactor-code` | POST | Versioned alias for refactor endpoint |
 | `/generate-test` | POST | Generate pytest tests for a function |
+| `/v1/generate-test` | POST | Versioned alias for test generation |
+| `/v1/live-metrics` | POST | Versioned alias for live metrics |
+| `/v1/jobs/analyze` | POST | Submit asynchronous analysis job |
+| `/v1/jobs/<job_id>` | GET | Poll asynchronous analysis result |
 | `/healthz` | GET | Liveness endpoint |
 | `/readyz` | GET | Readiness endpoint |
+| `/metrics` | GET | Prometheus-style service metrics |
 
 ## Configuration
 
@@ -118,11 +129,14 @@ The application uses the following environment variables:
 | `FLASK_SECRET_KEY` | Flask session signing secret (required) |
 | `APP_ADMIN_USERNAME` | Login username (required) |
 | `APP_ADMIN_PASSWORD_HASH` | Password hash generated with Werkzeug (required) |
+| `APP_ADMIN_ROLE` | Role assigned to the configured admin user |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origin allowlist |
 | `MODEL_TIMEOUT_SECONDS` | Timeout in seconds for model requests |
 | `FLASK_DEBUG` | Enables Flask debug mode when true |
 | `PORT` | Application port |
 | `SESSION_COOKIE_SECURE` | Secure-cookie flag for HTTPS environments |
+| `MAX_FAILED_LOGINS` | Failed attempts before lockout |
+| `LOCKOUT_SECONDS` | Lockout duration after threshold is reached |
 
 ## Testing and CI
 

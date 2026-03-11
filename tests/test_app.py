@@ -88,3 +88,58 @@ def test_analyze_returns_400_for_missing_code(client):
     response = client.post("/analyze-all", json={"code": ""})
     assert response.status_code == 400
     assert response.get_json()["error"] == "No code provided"
+
+
+def test_v1_live_metrics_alias(client):
+    login_response = login(client)
+    assert login_response.status_code == 302
+
+    response = client.post("/v1/live-metrics", json={"code": "def x():\n    return 1"})
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert "loc" in payload
+
+
+def test_async_job_endpoint_requires_code(client):
+    login_response = login(client)
+    assert login_response.status_code == 302
+
+    response = client.post("/v1/jobs/analyze", json={"code": ""})
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "No code provided"
+
+
+def test_metrics_endpoint(client):
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "codescribe_requests_total" in body
+
+
+def test_login_lockout_after_repeated_failures(client):
+    for _ in range(5):
+        page = client.get("/login")
+        token = extract_csrf_token(page.get_data(as_text=True))
+        response = client.post(
+            "/login",
+            data={
+                "username": "admin",
+                "password": "wrong-password",
+                "csrf_token": token,
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code in (200, 429)
+
+    locked = client.get("/login")
+    token = extract_csrf_token(locked.get_data(as_text=True))
+    final = client.post(
+        "/login",
+        data={
+            "username": "admin",
+            "password": "wrong-password",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert final.status_code == 429
