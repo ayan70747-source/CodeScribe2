@@ -45,6 +45,31 @@
             </div>
         </header>
         <main class="live-workbench">
+            <section class="panel panel-workflow" aria-label="Analysis workflow">
+                <div class="workflow-strip" role="list">
+                    <div class="workflow-step active" data-step="input" role="listitem">
+                        <span class="step-index">1</span>
+                        <div>
+                            <strong>Input</strong>
+                            <p>Paste code and optional trace snippet.</p>
+                        </div>
+                    </div>
+                    <div class="workflow-step" data-step="analyze" role="listitem">
+                        <span class="step-index">2</span>
+                        <div>
+                            <strong>Analyze</strong>
+                            <p>Run immediate analysis or queue async job.</p>
+                        </div>
+                    </div>
+                    <div class="workflow-step" data-step="review" role="listitem">
+                        <span class="step-index">3</span>
+                        <div>
+                            <strong>Review</strong>
+                            <p>Inspect docs, security, trace, graph, and SQL report.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
             <section class="panel panel-input live-editor-panel">
                 <div class="live-editor-grid editor-container">
                     <div class="editor-column">
@@ -96,9 +121,22 @@
                 </div>
             </section>
             <section class="panel panel-controls">
-                <div class="button-row">
-                    <button id="analyze-button" class="cyber-button primary-action">Analyze Code</button>
-                    <div id="loader" class="loader" style="display: none;"></div>
+                <div class="control-grid">
+                    <div class="button-row">
+                        <button id="analyze-button" class="cyber-button primary-action">Analyze Code</button>
+                        <button id="analyze-async-button" class="cyber-button secondary-action" type="button">Queue Async Job</button>
+                        <div id="loader" class="loader" style="display: none;"></div>
+                    </div>
+                    <p id="analysis-feedback" class="helper-text subtle" aria-live="polite">Ready to run analysis.</p>
+                    <aside class="jobs-panel" aria-label="Analysis jobs">
+                        <div class="jobs-panel-header">
+                            <h3 class="panel-title">Background Jobs</h3>
+                            <button id="refresh-jobs-button" class="dynamic-button" type="button">Refresh</button>
+                        </div>
+                        <ul id="jobs-list" class="jobs-list">
+                            <li class="jobs-empty">No background jobs yet.</li>
+                        </ul>
+                    </aside>
                 </div>
             </section>
             <section class="panel panel-results">
@@ -115,18 +153,38 @@
                         <button id="tab-database" class="tab-button" data-tab="database" role="tab" aria-selected="false" aria-controls="database-tab">🗄️ Database</button>
                     </div>
                     <div id="doc-tab" class="tab-content active" data-tab="doc" role="tabpanel" aria-labelledby="tab-doc">
+                        <div class="result-card-header">
+                            <span class="result-chip">Summary</span>
+                            <span class="result-caption">Documentation output</span>
+                        </div>
                         <div id="doc-output" class="tab-output">Your documentation will appear here...</div>
                     </div>
                     <div id="visualizer-tab" class="tab-content" data-tab="visualizer" role="tabpanel" aria-labelledby="tab-visualizer">
+                        <div class="result-card-header">
+                            <span class="result-chip">Topology</span>
+                            <span class="result-caption">Call graph and dependency map</span>
+                        </div>
                         <div id="visualizer-output" class="tab-output">Run an analysis to see the call graph.</div>
                     </div>
                     <div id="audit-tab" class="tab-content" data-tab="audit" role="tabpanel" aria-labelledby="tab-audit">
+                        <div class="result-card-header">
+                            <span class="result-chip">Risk</span>
+                            <span class="result-caption">Security findings and mitigation guidance</span>
+                        </div>
                         <div id="audit-output" class="tab-output">Run an analysis to see potential vulnerabilities.</div>
                     </div>
                     <div id="trace-tab" class="tab-content" data-tab="trace" role="tabpanel" aria-labelledby="tab-trace">
+                        <div class="result-card-header">
+                            <span class="result-chip">Runtime</span>
+                            <span class="result-caption">Execution narrative and variable flow</span>
+                        </div>
                         <div id="trace-output" class="tab-output">Add an invocation snippet to generate a step-by-step runtime story.</div>
                     </div>
                     <div id="database-tab" class="tab-content" data-tab="database" role="tabpanel" aria-labelledby="tab-database">
+                        <div class="result-card-header">
+                            <span class="result-chip">Data</span>
+                            <span class="result-caption">SQL pattern and optimization report</span>
+                        </div>
                         <div id="database-output" class="tab-output">No SQL insight yet. Run an analysis or upload a project.</div>
                     </div>
                 </div>

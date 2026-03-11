@@ -19,6 +19,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const analyzeButton = document.getElementById('analyze-button');
     const defaultButtonLabel = analyzeButton.textContent;
+    const analyzeAsyncButton = document.getElementById('analyze-async-button');
+    const refreshJobsButton = document.getElementById('refresh-jobs-button');
+    const jobsList = document.getElementById('jobs-list');
+    const analysisFeedback = document.getElementById('analysis-feedback');
     const uploadZipButton = document.getElementById('upload-zip-button');
     const projectZipInput = document.getElementById('project-zip-input');
     const projectUploadStatus = document.getElementById('project-upload-status');
@@ -46,6 +50,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let lastSubmittedCode = '';
     let complexityChart;
+    let activeStep = 'input';
+    const jobs = new Map();
 
     const sanitizeHtml = (html, options = {}) => {
         if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
@@ -62,6 +68,125 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         element.innerHTML = sanitized;
+    };
+
+    const setFeedback = (message) => {
+        if (analysisFeedback) {
+            analysisFeedback.textContent = message;
+        }
+    };
+
+    const setWorkflowStep = (step) => {
+        if (!step || activeStep === step) return;
+        activeStep = step;
+        const steps = document.querySelectorAll('.workflow-step');
+        steps.forEach((element) => {
+            element.classList.toggle('active', element.dataset.step === step);
+        });
+    };
+
+    const formatTimestamp = (unixSeconds) => {
+        if (!unixSeconds) return '—';
+        const date = new Date(unixSeconds * 1000);
+        return date.toLocaleTimeString();
+    };
+
+    const renderJobs = () => {
+        if (!jobsList) return;
+        jobsList.textContent = '';
+        const sorted = Array.from(jobs.entries())
+            .sort(([, a], [, b]) => (b.submitted_at || b.started_at || 0) - (a.submitted_at || a.started_at || 0));
+
+        if (!sorted.length) {
+            const empty = document.createElement('li');
+            empty.className = 'jobs-empty';
+            empty.textContent = 'No background jobs yet.';
+            jobsList.appendChild(empty);
+            return;
+        }
+
+        sorted.slice(0, 8).forEach(([jobId, job]) => {
+            const item = document.createElement('li');
+            item.className = 'job-item';
+
+            const head = document.createElement('div');
+            head.className = 'job-head';
+
+            const idNode = document.createElement('span');
+            idNode.className = 'job-id';
+            idNode.textContent = jobId;
+
+            const statusNode = document.createElement('span');
+            const status = String(job.status || 'queued').toLowerCase();
+            statusNode.className = `job-status ${status}`;
+            statusNode.textContent = status;
+
+            head.appendChild(idNode);
+            head.appendChild(statusNode);
+            item.appendChild(head);
+
+            const meta = document.createElement('p');
+            meta.className = 'job-meta';
+            const submitted = formatTimestamp(job.submitted_at);
+            const finished = job.finished_at ? formatTimestamp(job.finished_at) : '—';
+            meta.textContent = `Submitted: ${submitted} • Finished: ${finished}`;
+            item.appendChild(meta);
+
+            if (job.error) {
+                const error = document.createElement('p');
+                error.className = 'job-meta';
+                error.textContent = `Error: ${job.error}`;
+                item.appendChild(error);
+            }
+
+            jobsList.appendChild(item);
+        });
+    };
+
+    const applyAnalysisPayload = async (payload, fallbackTraceMessage) => {
+        renderMarkdown(docOutput, payload.documentation, 'No documentation generated.');
+        renderMarkdown(auditOutput, payload.audit, 'No security findings reported.');
+        renderMarkdown(traceOutput, payload.trace, fallbackTraceMessage || 'No live trace explanation available.');
+        await renderVisualizer(payload.visualizer);
+        renderMarkdown(databaseOutput, payload.database_report, 'No database report available.');
+        injectDocumentationActions();
+        injectAuditActions();
+        setActiveTab('doc');
+    };
+
+    const fetchJobState = async (jobId) => {
+        const { response, payload } = await fetchJsonWithTimeout(`/v1/jobs/${jobId}`, {
+            method: 'GET',
+        }, 12000);
+        if (!response.ok) {
+            throw new Error(payload.error || 'Unable to fetch job status.');
+        }
+        jobs.set(jobId, { ...payload, job_id: jobId });
+        renderJobs();
+        return payload;
+    };
+
+    const pollJobUntilDone = async (jobId) => {
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+            const job = await fetchJobState(jobId);
+            const status = String(job.status || '').toLowerCase();
+            if (status === 'completed') {
+                if (job.result && typeof job.result === 'object') {
+                    lastSubmittedCode = codeInput.value.trim();
+                    clearDynamicButtons();
+                    await applyAnalysisPayload(job.result, 'No live trace explanation available.');
+                    setFeedback(`Job ${jobId.slice(0, 8)} completed. Results loaded.`);
+                    setWorkflowStep('review');
+                }
+                return;
+            }
+            if (status === 'failed') {
+                setFeedback(`Job ${jobId.slice(0, 8)} failed.`);
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+        setFeedback(`Job ${jobId.slice(0, 8)} is still running. Use Refresh to check status.`);
     };
 
     const fetchJsonWithTimeout = async (url, init = {}, timeoutMs = 25000) => {
@@ -222,10 +347,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     setActiveTab('doc');
+    setWorkflowStep('input');
 
     const setLoaderState = (isLoading) => {
         loader.style.display = isLoading ? 'block' : 'none';
         analyzeButton.disabled = isLoading;
+        if (analyzeAsyncButton) {
+            analyzeAsyncButton.disabled = isLoading;
+        }
         analyzeButton.textContent = isLoading ? 'Analyzing...' : defaultButtonLabel;
     };
 
@@ -464,10 +593,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!code) {
             docOutput.textContent = 'Please paste some code first.';
             setActiveTab('doc');
+            setFeedback('Add source code before starting analysis.');
             return;
         }
 
         setLoaderState(true);
+        setWorkflowStep('analyze');
+        setFeedback('Running synchronous analysis...');
         clearDynamicButtons();
 
         docOutput.textContent = 'Generating documentation...';
@@ -497,15 +629,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             lastSubmittedCode = code;
-
-            renderMarkdown(docOutput, payload.documentation, 'No documentation generated.');
-            renderMarkdown(auditOutput, payload.audit, 'No security findings reported.');
-            renderMarkdown(traceOutput, payload.trace, 'No live trace explanation available.');
-            await renderVisualizer(payload.visualizer);
-            renderMarkdown(databaseOutput, payload.database_report, 'No database report available.');
-
-            injectDocumentationActions();
-            injectAuditActions();
+            await applyAnalysisPayload(payload, 'No live trace explanation available.');
+            setFeedback('Analysis completed. Review tabs below.');
+            setWorkflowStep('review');
         } catch (error) {
             console.error('Fetch Error:', error);
             docOutput.textContent = 'An error occurred. Check the console (F12) for details.';
@@ -514,12 +640,77 @@ document.addEventListener('DOMContentLoaded', () => {
             visualizerOutput.textContent = '';
             databaseOutput.textContent = '';
             setActiveTab('doc');
+            setFeedback('Analysis failed. Check your input and retry.');
         } finally {
             setLoaderState(false);
         }
     };
 
     analyzeButton.addEventListener('click', handleAnalyze);
+
+    const handleAnalyzeAsync = async () => {
+        const code = codeInput.value.trim();
+        const traceSnippet = traceInput.value.trim();
+        if (!code) {
+            setFeedback('Add source code before queueing a background job.');
+            return;
+        }
+
+        setWorkflowStep('analyze');
+        setFeedback('Queueing asynchronous analysis job...');
+        analyzeAsyncButton.disabled = true;
+
+        try {
+            const { response, payload } = await fetchJsonWithTimeout('/v1/jobs/analyze', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ code, trace_input: traceSnippet }),
+            }, 12000);
+
+            if (!response.ok) {
+                throw new Error(payload.error || 'Unable to queue analysis job.');
+            }
+
+            const jobId = payload.job_id;
+            jobs.set(jobId, {
+                status: payload.status || 'queued',
+                submitted_at: Date.now() / 1000,
+            });
+            renderJobs();
+            setFeedback(`Job queued: ${jobId.slice(0, 8)}. Polling for completion...`);
+            await pollJobUntilDone(jobId);
+        } catch (error) {
+            console.error('Async job error:', error);
+            setFeedback(error.message || 'Failed to queue async job.');
+        } finally {
+            analyzeAsyncButton.disabled = false;
+        }
+    };
+
+    if (analyzeAsyncButton) {
+        analyzeAsyncButton.addEventListener('click', handleAnalyzeAsync);
+    }
+
+    if (refreshJobsButton) {
+        refreshJobsButton.addEventListener('click', async () => {
+            const ids = Array.from(jobs.keys());
+            if (!ids.length) {
+                setFeedback('No jobs to refresh yet.');
+                return;
+            }
+            setFeedback('Refreshing job statuses...');
+            await Promise.all(ids.map(async (jobId) => {
+                try {
+                    await fetchJobState(jobId);
+                } catch (error) {
+                    console.error(`Failed to refresh job ${jobId}:`, error);
+                }
+            }));
+            setFeedback('Job statuses updated.');
+        });
+    }
 
     const refreshLiveMetrics = (metrics, sourceCode) => {
         if (!metrics) {
@@ -615,6 +806,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (uploadZipButton) {
         uploadZipButton.addEventListener('click', handleZipUpload);
     }
+
+    codeInput?.addEventListener('focus', () => setWorkflowStep('input'));
+    traceInput?.addEventListener('focus', () => setWorkflowStep('input'));
 
     const handleGenerateTest = async (functionName) => {
         if (!lastSubmittedCode) {
