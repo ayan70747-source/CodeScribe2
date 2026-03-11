@@ -8,23 +8,31 @@ It uses Google Gemini for code analysis and Markdown documentation generation.
 
 import ast
 import io
+import logging
 import os
 import re
+import secrets
 import sys
 import shutil
 import tempfile
+import threading
+import time
 import zipfile
+from collections import defaultdict, deque
 from contextlib import redirect_stdout
+from datetime import timedelta
+from functools import wraps
 from pathlib import Path
 
 import astor
 import graphviz
 import google.generativeai as genai
-from flask import Flask, render_template, request, jsonify, redirect, url_for, session
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session, g, has_request_context
 from dotenv import load_dotenv
 from radon.complexity import cc_visit
 from radon.metrics import mi_visit
 from radon.raw import analyze as raw_analyze
+from werkzeug.security import check_password_hash
 
 # --- Load API Key ---
 load_dotenv()
@@ -48,6 +56,24 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
 ]
 MODEL_NAME = 'gemini-2.5-flash-preview-09-2025'
+MODEL_TIMEOUT_SECONDS = int(os.getenv('MODEL_TIMEOUT_SECONDS', '60'))
+
+logging.basicConfig(
+    level=os.getenv('LOG_LEVEL', 'INFO').upper(),
+    format='%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s %(message)s',
+)
+logger = logging.getLogger('codescribe')
+
+
+class RequestIdFilter(logging.Filter):
+    """Inject request IDs into logs emitted during request handling."""
+
+    def filter(self, record):
+        record.request_id = getattr(g, 'request_id', '-') if has_request_context() else '-'
+        return True
+
+
+logger.addFilter(RequestIdFilter())
 
 DOC_SYSTEM_INSTRUCTION = """
 You are "CodeScribe," an expert AI developer specializing in documenting legacy code.
@@ -151,8 +177,95 @@ def _build_model(system_instruction: str) -> genai.GenerativeModel:
     )
 
 app = Flask(__name__)
-app.secret_key = 'codescribe-secret-key-2025-enterprise'
+
+flask_secret_key = os.getenv('FLASK_SECRET_KEY')
+if not flask_secret_key:
+    raise ValueError('FLASK_SECRET_KEY not found. Set it in your environment.')
+
+app.secret_key = flask_secret_key
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'false').lower() == 'true'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
+
+admin_username = os.getenv('APP_ADMIN_USERNAME')
+admin_password_hash = os.getenv('APP_ADMIN_PASSWORD_HASH')
+if not admin_username or not admin_password_hash:
+    raise ValueError('APP_ADMIN_USERNAME and APP_ADMIN_PASSWORD_HASH are required in the environment.')
+
+cors_allowed_origins = {
+    origin.strip()
+    for origin in os.getenv('CORS_ALLOWED_ORIGINS', 'http://127.0.0.1:8080,http://localhost:8080').split(',')
+    if origin.strip()
+}
+
+rate_limit_lock = threading.Lock()
+request_windows: dict[str, deque[float]] = defaultdict(deque)
+
+
+def rate_limit(max_requests: int, window_seconds: int):
+    """Apply a simple in-memory request cap per client and endpoint."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            client = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown').split(',')[0].strip()
+            endpoint_key = f"{client}:{request.endpoint or func.__name__}"
+            now = time.monotonic()
+            cutoff = now - window_seconds
+
+            with rate_limit_lock:
+                window = request_windows[endpoint_key]
+                while window and window[0] < cutoff:
+                    window.popleft()
+                if len(window) >= max_requests:
+                    return jsonify({"error": "Rate limit exceeded. Please retry shortly."}), 429
+                window.append(now)
+
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def login_required(func):
+    """Protect routes that require an authenticated user session."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if 'user' not in session:
+            return jsonify({"error": "Authentication required."}), 401
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def generate_csrf_token() -> str:
+    """Create a per-session CSRF token for HTML forms."""
+    token = session.get('_csrf_token')
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session['_csrf_token'] = token
+    return token
+
+
+def validate_csrf_token() -> bool:
+    """Validate incoming CSRF token for form POST requests."""
+    form_token = request.form.get('csrf_token', '')
+    session_token = session.get('_csrf_token', '')
+    return bool(form_token and session_token and secrets.compare_digest(form_token, session_token))
+
+
+app.jinja_env.globals['csrf_token'] = generate_csrf_token
+
+
+@app.before_request
+def attach_request_context():
+    """Attach request metadata used for observability and tracing."""
+    g.request_id = secrets.token_hex(8)
+    g.request_started = time.monotonic()
 
 
 @app.route('/')
@@ -174,6 +287,8 @@ def get_ai_documentation(code_str: str) -> str:
         f"""Here is the code:\n\n```
 {code_str}
 ```"""
+        ,
+        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -186,6 +301,8 @@ def get_ai_security_audit(code_str: str) -> str:
         f"""Audit the following code:\n\n```
 {code_str}
 ```"""
+        ,
+        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -202,7 +319,10 @@ def get_ai_refactor(code_str: str, vulnerability_context: str) -> str:
         "```\n\nVulnerability Context:\n"
         f"{vulnerability_context}"
     )
-    response = chat_session.send_message(prompt)
+    response = chat_session.send_message(
+        prompt,
+        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
+    )
     return response.text
 
 
@@ -348,7 +468,10 @@ def get_ai_test_module(function_source: str, function_name: str) -> str:
         f"{function_source}\n"
         "```"
     )
-    response = chat_session.send_message(prompt)
+    response = chat_session.send_message(
+        prompt,
+        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
+    )
     return response.text
 
 
@@ -358,7 +481,8 @@ def get_ai_project_overview(project_code: str) -> str:
     chat_session = architect_model.start_chat(history=[])
     response = chat_session.send_message(
         "Provide a project-wide architecture brief for the following source files:\n\n" +
-        project_code
+        project_code,
+        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -427,7 +551,10 @@ def get_ai_database_report(sql_queries: list[str]) -> str:
     prompt = "\n\n".join(prompt_sections)
     dba_model = _build_model(DBA_SYSTEM_INSTRUCTION)
     chat_session = dba_model.start_chat(history=[])
-    response = chat_session.send_message(prompt)
+    response = chat_session.send_message(
+        prompt,
+        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
+    )
     return response.text
 
 
@@ -636,8 +763,25 @@ def get_live_trace_explanation(code_str: str, trace_input: str) -> str:
         f"{trace_report}\n"
         "```"
     )
-    response = chat_session.send_message(prompt)
+    response = chat_session.send_message(
+        prompt,
+        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
+    )
     return response.text
+
+
+@app.route('/healthz')
+def healthz():
+    """Return process liveness for infrastructure checks."""
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route('/readyz')
+def readyz():
+    """Return readiness based on required runtime configuration."""
+    ready = bool(api_key and app.secret_key and admin_username and admin_password_hash)
+    status_code = 200 if ready else 503
+    return jsonify({"ready": ready}), status_code
 
 
 @app.route('/about')
@@ -650,6 +794,8 @@ def about():
 
 
 @app.route('/analyze-all', methods=['POST'])
+@login_required
+@rate_limit(max_requests=15, window_seconds=60)
 def analyze_all():
     """Aggregate documentation, security audit, call graph, and trace insights."""
     try:
@@ -692,12 +838,14 @@ def analyze_all():
             results['database_report'] = "No SQL queries detected in the provided code."
 
         return jsonify(results)
-    except Exception as exc:
-        print(f"An error occurred: {exc}")
+    except Exception:
+        logger.exception("Analyze-all failed")
         return jsonify({"error": "An internal error occurred."}), 500
 
 
 @app.route('/upload-zip', methods=['POST'])
+@login_required
+@rate_limit(max_requests=6, window_seconds=60)
 def upload_zip_endpoint():
     """Handle project-wide uploads for The Architect workflow."""
     if 'projectZip' not in request.files:
@@ -764,14 +912,16 @@ def upload_zip_endpoint():
         return jsonify({"error": "The uploaded file is not a valid zip archive."}), 400
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        print(f"Project upload error: {exc}")
+    except Exception:
+        logger.exception("Project upload failed")
         return jsonify({"error": "Failed to analyze the uploaded project."}), 500
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @app.route('/refactor-code', methods=['POST'])
+@login_required
+@rate_limit(max_requests=10, window_seconds=60)
 def refactor_code():
     """Leverage the refactor persona to patch reported vulnerabilities."""
     try:
@@ -790,12 +940,14 @@ def refactor_code():
             return jsonify({"error": str(exc)}), 400
 
         return jsonify({"refactored_code": refactored})
-    except Exception as exc:
-        print(f"An error occurred: {exc}")
+    except Exception:
+        logger.exception("Refactor request failed")
         return jsonify({"error": "An internal error occurred."}), 500
 
 
 @app.route('/generate-test', methods=['POST'])
+@login_required
+@rate_limit(max_requests=10, window_seconds=60)
 def generate_test():
     """Generate pytest scaffolding for a requested function."""
     try:
@@ -816,12 +968,14 @@ def generate_test():
         return jsonify({"test_code": test_module, "function_source": function_source})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        print(f"An error occurred: {exc}")
+    except Exception:
+        logger.exception("Test generation failed")
         return jsonify({"error": "An internal error occurred."}), 500
 
 
 @app.route('/live-metrics', methods=['POST'])
+@login_required
+@rate_limit(max_requests=60, window_seconds=60)
 def live_metrics():
     """Return instantaneous code metrics without invoking the LLM."""
     try:
@@ -830,8 +984,8 @@ def live_metrics():
         if not code:
             return jsonify({"error": "No code provided"}), 400
         return jsonify(calculate_code_metrics(code))
-    except Exception as exc:
-        print(f"Live metrics error: {exc}")
+    except Exception:
+        logger.exception("Live metrics failed")
         return jsonify({"error": "Failed to calculate metrics."}), 500
 
 
@@ -875,12 +1029,29 @@ def calculate_code_metrics(code_str: str) -> dict[str, float | int]:
 
     return metrics
 
-# --- CORS headers to allow requests ---
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST')
+    origin = request.headers.get('Origin')
+    if origin and origin in cors_allowed_origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Vary'] = 'Origin'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-CSRF-Token'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
+    response.headers['X-Request-ID'] = getattr(g, 'request_id', '-')
+    duration_ms = int((time.monotonic() - getattr(g, 'request_started', time.monotonic())) * 1000)
+    response.headers['X-Response-Time-ms'] = str(max(duration_ms, 0))
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none';"
+    )
     return response
 
 # --- Authentication Routes ---
@@ -889,15 +1060,17 @@ def after_request(response):
 def login():
     """Handle user login"""
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
-        # Simple authentication check
-        if username == 'admin' and password == 'admin':
+        if not validate_csrf_token():
+            return render_template('login.html', error='Invalid CSRF token.'), 400
+
+        username = (request.form.get('username') or '').strip()
+        password = request.form.get('password') or ''
+
+        if username == admin_username and check_password_hash(admin_password_hash, password):
+            session.permanent = True
             session['user'] = username
             return redirect(url_for('index'))
-        else:
-            return render_template('login.html', error='Invalid username or password')
+        return render_template('login.html', error='Invalid username or password')
     
     return render_template('login.html')
 
@@ -912,23 +1085,36 @@ def settings():
     """Handle user settings"""
     if 'user' not in session:
         return redirect(url_for('login'))
-    
+
     if request.method == 'POST':
-        api_key = request.form.get('api_key')
-        temperature = request.form.get('temperature')
-        
-        # Save settings to session
-        session['api_key'] = api_key
-        session['temperature'] = temperature
+        if not validate_csrf_token():
+            return render_template('settings.html', message='Invalid CSRF token.'), 400
+
+        temperature_raw = (request.form.get('temperature') or '0.3').strip()
+        try:
+            temperature_value = float(temperature_raw)
+        except ValueError:
+            return render_template('settings.html', message='Temperature must be a number between 0 and 1.'), 400
+
+        if temperature_value < 0 or temperature_value > 1:
+            return render_template('settings.html', message='Temperature must be between 0 and 1.'), 400
+
+        session['temperature'] = f"{temperature_value:.1f}"
         session.modified = True
-        
-        return render_template('settings.html', message='Settings saved successfully!')
-    
-    api_key = session.get('api_key', '')
+
+        return render_template(
+            'settings.html',
+            message='Settings saved successfully. API keys are managed via environment variables.',
+            temperature=session.get('temperature', '0.3'),
+            api_key=''
+        )
+
     temperature = session.get('temperature', '0.3')
-    
-    return render_template('settings.html', api_key=api_key, temperature=temperature)
+
+    return render_template('settings.html', api_key='', temperature=temperature)
 
 # --- Main Entrypoint ---
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    app_port = int(os.getenv('PORT', '8080'))
+    app_debug = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
+    app.run(host='0.0.0.0', port=app_port, debug=app_debug)

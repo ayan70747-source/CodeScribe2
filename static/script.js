@@ -2,6 +2,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.mermaid && typeof window.mermaid.initialize === 'function') {
         mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
     }
+    if (window.CanvasEffect && typeof window.CanvasEffect.init === 'function') {
+        window.CanvasEffect.init();
+    }
 
     const debounce = (fn, delay = 500) => {
         let timerId;
@@ -43,6 +46,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let lastSubmittedCode = '';
     let complexityChart;
+
+    const sanitizeHtml = (html, options = {}) => {
+        if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+            return window.DOMPurify.sanitize(html, options);
+        }
+        return '';
+    };
+
+    const setSafeHtml = (element, html, options = {}) => {
+        if (!element) return;
+        const sanitized = sanitizeHtml(html, options);
+        if (!sanitized) {
+            element.textContent = 'Unable to render content safely.';
+            return;
+        }
+        element.innerHTML = sanitized;
+    };
+
+    const fetchJsonWithTimeout = async (url, init = {}, timeoutMs = 25000) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const response = await fetch(url, {
+                ...init,
+                signal: controller.signal,
+            });
+            const payload = await response.json();
+            return { response, payload };
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    };
 
     const createComplexityChart = () => {
         if (!complexityCanvas || typeof Chart === 'undefined') {
@@ -199,7 +234,10 @@ document.addEventListener('DOMContentLoaded', () => {
             element.textContent = fallbackMessage;
             return;
         }
-        element.innerHTML = marked.parse(markdownText);
+        const rendered = marked.parse(markdownText);
+        setSafeHtml(element, rendered, {
+            USE_PROFILES: { html: true },
+        });
     };
 
     const renderVisualizer = async (visualizerPayload) => {
@@ -241,7 +279,9 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const uniqueId = `visualizer-graph-${Date.now()}`;
                 const { svg } = await mermaid.render(uniqueId, mermaidDefinition);
-                visualizerOutput.innerHTML = svg;
+                setSafeHtml(visualizerOutput, svg, {
+                    USE_PROFILES: { svg: true, svgFilters: true },
+                });
                 return;
             } catch (error) {
                 console.error('Mermaid render error:', error);
@@ -250,7 +290,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (graphvizSvg) {
             if (graphvizSvg.startsWith('<svg')) {
-                visualizerOutput.innerHTML = graphvizSvg;
+                setSafeHtml(visualizerOutput, graphvizSvg, {
+                    USE_PROFILES: { svg: true, svgFilters: true },
+                });
             } else {
                 visualizerOutput.textContent = graphvizSvg;
             }
@@ -262,13 +304,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const renderProjectGraph = async (payload) => {
         const { mermaid: mermaidDefinition, metadata = {}, nodes = [], edges = [] } = payload;
-        visualizerOutput.innerHTML = '';
+        visualizerOutput.textContent = '';
 
         if (mermaidDefinition && window.mermaid && typeof window.mermaid.render === 'function') {
             try {
                 const uniqueId = `project-visualizer-${Date.now()}`;
                 const { svg } = await mermaid.render(uniqueId, mermaidDefinition);
-                visualizerOutput.innerHTML = svg;
+                setSafeHtml(visualizerOutput, svg, {
+                    USE_PROFILES: { svg: true, svgFilters: true },
+                });
             } catch (error) {
                 console.error('Project mermaid render error:', error);
                 visualizerOutput.textContent = 'Project graph available but rendering failed.';
@@ -279,16 +323,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const metaWrapper = document.createElement('div');
         metaWrapper.className = 'graph-meta';
-        metaWrapper.innerHTML = `
-            <h4>Project Graph Snapshot</h4>
-            <ul>
-                <li><strong>Files:</strong> ${metadata.files ?? '—'}</li>
-                <li><strong>Functions:</strong> ${metadata.defined_functions ?? '—'}</li>
-                <li><strong>External Calls:</strong> ${metadata.external_nodes ?? '—'}</li>
-                <li><strong>Edges:</strong> ${metadata.edges ?? '—'}</li>
-                <li><strong>SQL Queries:</strong> ${metadata.sql_queries ?? 0}</li>
-            </ul>
-        `;
+
+        const title = document.createElement('h4');
+        title.textContent = 'Project Graph Snapshot';
+        metaWrapper.appendChild(title);
+
+        const list = document.createElement('ul');
+        const stats = [
+            ['Files', metadata.files ?? '—'],
+            ['Functions', metadata.defined_functions ?? '—'],
+            ['External Calls', metadata.external_nodes ?? '—'],
+            ['Edges', metadata.edges ?? '—'],
+            ['SQL Queries', metadata.sql_queries ?? 0],
+        ];
+        stats.forEach(([label, value]) => {
+            const item = document.createElement('li');
+            const strong = document.createElement('strong');
+            strong.textContent = `${label}: `;
+            item.appendChild(strong);
+            item.appendChild(document.createTextNode(String(value)));
+            list.appendChild(item);
+        });
+
+        metaWrapper.appendChild(list);
         visualizerOutput.appendChild(metaWrapper);
 
         if (nodes.length && edges.length) {
@@ -420,15 +477,13 @@ document.addEventListener('DOMContentLoaded', () => {
         databaseOutput.textContent = 'Scanning for SQL queries...';
 
         try {
-            const response = await fetch('/analyze-all', {
+            const { response, payload } = await fetchJsonWithTimeout('/analyze-all', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ code, trace_input: traceSnippet })
             });
-
-            const payload = await response.json();
 
             if (!response.ok) {
                 const message = payload.error || 'The server returned an error.';
@@ -486,14 +541,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch('/live-metrics', {
+            const { response, payload } = await fetchJsonWithTimeout('/live-metrics', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ code: sourceCode }),
-            });
-            const payload = await response.json();
+            }, 12000);
             if (!response.ok) {
                 throw new Error(payload.error || 'Unable to fetch live metrics.');
             }
@@ -528,11 +582,10 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadZipButton.textContent = 'Mapping project...';
 
         try {
-            const response = await fetch('/upload-zip', {
+            const { response, payload } = await fetchJsonWithTimeout('/upload-zip', {
                 method: 'POST',
                 body: formData,
-            });
-            const payload = await response.json();
+            }, 90000);
             if (!response.ok) {
                 const message = payload.error || 'Project analysis failed.';
                 throw new Error(message);
@@ -570,14 +623,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch('/generate-test', {
+            const { response, payload } = await fetchJsonWithTimeout('/generate-test', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ code: lastSubmittedCode, function_name: functionName })
             });
-            const payload = await response.json();
 
             if (!response.ok) {
                 const message = payload.error || 'Unable to generate tests.';
@@ -599,14 +651,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch('/refactor-code', {
+            const { response, payload } = await fetchJsonWithTimeout('/refactor-code', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ code: lastSubmittedCode, vulnerability_context: vulnerabilityContext })
             });
-            const payload = await response.json();
 
             if (!response.ok) {
                 const message = payload.error || 'Unable to refactor code.';

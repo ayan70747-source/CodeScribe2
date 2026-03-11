@@ -17,7 +17,9 @@ CodeScribe is a web application that uses Google Gemini AI to automatically gene
 - **Test Generation** - Creates pytest test scaffolding for your functions
 - **Code Refactoring** - AI-assisted vulnerability fixes
 - **User Authentication** - Login system with session management
-- **Settings Management** - Configure API keys and model parameters
+- **Security Baseline** - CSRF-protected forms, CSP headers, request IDs, rate limits, and origin allowlist CORS
+- **Health Endpoints** - Liveness and readiness checks for deployment platforms
+- **Settings Management** - Configure model parameters (API keys remain environment-managed)
 
 ## Quick Start
 
@@ -50,9 +52,18 @@ CodeScribe is a web application that uses Google Gemini AI to automatically gene
    ```bash
    cp .env.example .env
    ```
-   Then edit `.env` and add your Gemini API key:
+   Then edit `.env` and set required values:
    ```
    GEMINI_API_KEY=your_api_key_here
+   FLASK_SECRET_KEY=your_long_random_secret
+   APP_ADMIN_USERNAME=admin
+   APP_ADMIN_PASSWORD_HASH=your_password_hash
+   CORS_ALLOWED_ORIGINS=http://127.0.0.1:8080,http://localhost:8080
+   ```
+
+   Password hash generation example:
+   ```bash
+   python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('change-me'))"
    ```
 
 5. Run the application
@@ -94,6 +105,8 @@ codeScribe2/
 | `/upload-zip` | POST | Project-wide analysis from ZIP upload |
 | `/refactor-code` | POST | AI-assisted code refactoring |
 | `/generate-test` | POST | Generate pytest tests for a function |
+| `/healthz` | GET | Liveness endpoint |
+| `/readyz` | GET | Readiness endpoint |
 
 ## Configuration
 
@@ -102,6 +115,26 @@ The application uses the following environment variables:
 | Variable | Description |
 |----------|-------------|
 | `GEMINI_API_KEY` | Your Google Gemini API key (required) |
+| `FLASK_SECRET_KEY` | Flask session signing secret (required) |
+| `APP_ADMIN_USERNAME` | Login username (required) |
+| `APP_ADMIN_PASSWORD_HASH` | Password hash generated with Werkzeug (required) |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated browser origin allowlist |
+| `MODEL_TIMEOUT_SECONDS` | Timeout in seconds for model requests |
+| `FLASK_DEBUG` | Enables Flask debug mode when true |
+| `PORT` | Application port |
+| `SESSION_COOKIE_SECURE` | Secure-cookie flag for HTTPS environments |
+
+## Testing and CI
+
+- Run tests locally:
+   ```bash
+   pytest -q
+   ```
+- GitHub Actions workflow at `.github/workflows/ci.yml` runs:
+   - pytest
+   - pip-audit vulnerability scan
+
+Note: The CI scan temporarily ignores advisories tied to environment tooling (`pip`) and an upstream transitive `protobuf` advisory until compatible upstream packages are upgraded.
 
 ## Deployment
 

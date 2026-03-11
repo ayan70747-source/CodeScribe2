@@ -125,6 +125,7 @@
             {% endif %}
 
             <form method="POST" action="{{ url_for('login') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="username">Username</label>
                     <input 
@@ -152,9 +153,8 @@
             </form>
 
             <div class="demo-credentials">
-                <p><strong>Demo Credentials:</strong></p>
-                <p>Username: <code>admin</code></p>
-                <p>Password: <code>admin</code></p>
+                <p><strong>Access is environment-managed.</strong></p>
+                <p>Ask your administrator for credentials.</p>
             </div>
         </div>
     </div>
