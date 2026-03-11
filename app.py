@@ -167,7 +167,7 @@ def index():
     return render_template('index.html')
 
 def get_ai_documentation(code_str: str) -> str:
-    """Send the user's code to the documentation persona and return Markdown."""
+    """Send the user's code to the documentataion files."""
     doc_model = _build_model(DOC_SYSTEM_INSTRUCTION)
     chat_session = doc_model.start_chat(history=[])
     response = chat_session.send_message(
@@ -932,4 +932,3 @@ def settings():
 # --- Main Entrypoint ---
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
-
