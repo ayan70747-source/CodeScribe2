@@ -74,7 +74,8 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
-logger.addFilter(RequestIdFilter())
+for _h in logging.root.handlers:
+    _h.addFilter(RequestIdFilter())
 
 DOC_SYSTEM_INSTRUCTION = """
 You are "CodeScribe," an expert AI developer specializing in documenting legacy code.
