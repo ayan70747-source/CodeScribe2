@@ -779,3 +779,51 @@ Validation run for this wave:
 - Commit: `f8c8cc0`
 - Branch: `main`
 - Repository: `https://github.com/tvbibayan/CodeScribe2.git`
+
+---
+
+### 13.11 Gemini SDK Compatibility Fix (Legacy `google-generativeai`)
+
+#### Before
+- `_build_model(system_instruction)` passed `system_instruction=...` into `genai.GenerativeModel(...)`.
+- On older SDK versions, constructor raised:
+  - `GenerativeModel.__init__() got an unexpected keyword argument 'system_instruction'`
+- AI routes used `start_chat(...).send_message(...)` flows tied to that model construction pattern.
+
+#### After
+Model construction now uses shared config only:
+```python
+def _build_model() -> genai.GenerativeModel:
+    return genai.GenerativeModel(
+        MODEL_NAME,
+        generation_config=GENERATION_CONFIG,
+        safety_settings=SAFETY_SETTINGS,
+    )
+```
+
+System instructions are prepended into each request payload:
+```python
+def _compose_prompt(system_instruction: str, user_prompt: str) -> str:
+    return (
+        f"System instruction:\n{system_instruction.strip()}\n\n"
+        f"User request:\n{user_prompt.strip()}"
+    )
+```
+
+Gemini calls were updated to:
+- Use `model.generate_content(...)`.
+- Pass `_compose_prompt(...)` output per persona (documentation, audit, refactor, tests, architecture, DBA, trace).
+
+#### Why
+- Restores compatibility with environments pinned to older `google-generativeai` releases.
+- Preserves persona behavior without requiring an immediate package upgrade.
+- Reduces SDK-surface assumptions in backend request flow.
+
+---
+
+### 13.12 Patch Metadata
+
+- Date: 2026-04-23
+- Commit: `6107d03`
+- Branch: `main`
+- Repository: `https://github.com/ayan70747-source/CodeScribe2`
