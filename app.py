@@ -169,13 +169,20 @@ Respond in Markdown under a "### Database Report" heading and keep each query se
 """
 
 
-def _build_model(system_instruction: str) -> genai.GenerativeModel:
+def _build_model() -> genai.GenerativeModel:
     """Create a Gemini model instance with the shared configuration."""
     return genai.GenerativeModel(
         MODEL_NAME,
         generation_config=GENERATION_CONFIG,
         safety_settings=SAFETY_SETTINGS,
-        system_instruction=system_instruction,
+    )
+
+
+def _compose_prompt(system_instruction: str, user_prompt: str) -> str:
+    """Embed system instruction into the prompt for SDK compatibility."""
+    return (
+        f"System instruction:\n{system_instruction.strip()}\n\n"
+        f"User request:\n{user_prompt.strip()}"
     )
 
 app = Flask(__name__)
@@ -369,13 +376,14 @@ def index():
 
 def get_ai_documentation(code_str: str) -> str:
     """Send the user's code to the documentataion files."""
-    doc_model = _build_model(DOC_SYSTEM_INSTRUCTION)
-    chat_session = doc_model.start_chat(history=[])
-    response = chat_session.send_message(
-        f"""Here is the code:\n\n```
+    doc_model = _build_model()
+    response = doc_model.generate_content(
+        _compose_prompt(
+            DOC_SYSTEM_INSTRUCTION,
+            f"""Here is the code:\n\n```
 {code_str}
 ```"""
-        ,
+        ),
         request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
@@ -383,13 +391,14 @@ def get_ai_documentation(code_str: str) -> str:
 
 def get_ai_security_audit(code_str: str) -> str:
     """Run the security audit persona against the provided source code."""
-    audit_model = _build_model(AUDIT_SYSTEM_INSTRUCTION)
-    chat_session = audit_model.start_chat(history=[])
-    response = chat_session.send_message(
-        f"""Audit the following code:\n\n```
+    audit_model = _build_model()
+    response = audit_model.generate_content(
+        _compose_prompt(
+            AUDIT_SYSTEM_INSTRUCTION,
+            f"""Audit the following code:\n\n```
 {code_str}
 ```"""
-        ,
+        ),
         request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
@@ -399,16 +408,15 @@ def get_ai_refactor(code_str: str, vulnerability_context: str) -> str:
     """Send the vulnerability details to the refactor persona."""
     if not vulnerability_context.strip():
         raise ValueError("vulnerability_context is required")
-    refactor_model = _build_model(REFACTOR_SYSTEM_INSTRUCTION)
-    chat_session = refactor_model.start_chat(history=[])
+    refactor_model = _build_model()
     prompt = (
         "Original Code:\n\n```python\n"
         f"{code_str}\n"
         "```\n\nVulnerability Context:\n"
         f"{vulnerability_context}"
     )
-    response = chat_session.send_message(
-        prompt,
+    response = refactor_model.generate_content(
+        _compose_prompt(REFACTOR_SYSTEM_INSTRUCTION, prompt),
         request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
@@ -548,16 +556,15 @@ def get_ai_test_module(function_source: str, function_name: str) -> str:
     if not function_source:
         raise ValueError(f"Function '{function_name}' not found in provided code.")
 
-    test_model = _build_model(TEST_GEN_SYSTEM_INSTRUCTION)
-    chat_session = test_model.start_chat(history=[])
+    test_model = _build_model()
     prompt = (
         f"Generate pytest tests for the following function `{function_name}`.\n\n"
         "```python\n"
         f"{function_source}\n"
         "```"
     )
-    response = chat_session.send_message(
-        prompt,
+    response = test_model.generate_content(
+        _compose_prompt(TEST_GEN_SYSTEM_INSTRUCTION, prompt),
         request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
@@ -565,11 +572,13 @@ def get_ai_test_module(function_source: str, function_name: str) -> str:
 
 def get_ai_project_overview(project_code: str) -> str:
     """Summarize an entire project using the Architect persona."""
-    architect_model = _build_model(ARCHITECT_SYSTEM_INSTRUCTION)
-    chat_session = architect_model.start_chat(history=[])
-    response = chat_session.send_message(
-        "Provide a project-wide architecture brief for the following source files:\n\n" +
-        project_code,
+    architect_model = _build_model()
+    response = architect_model.generate_content(
+        _compose_prompt(
+            ARCHITECT_SYSTEM_INSTRUCTION,
+            "Provide a project-wide architecture brief for the following source files:\n\n" +
+            project_code,
+        ),
         request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
@@ -637,10 +646,9 @@ def get_ai_database_report(sql_queries: list[str]) -> str:
         prompt_sections.append(f"Query {idx}:\n```sql\n{query}\n```")
 
     prompt = "\n\n".join(prompt_sections)
-    dba_model = _build_model(DBA_SYSTEM_INSTRUCTION)
-    chat_session = dba_model.start_chat(history=[])
-    response = chat_session.send_message(
-        prompt,
+    dba_model = _build_model()
+    response = dba_model.generate_content(
+        _compose_prompt(DBA_SYSTEM_INSTRUCTION, prompt),
         request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
@@ -842,8 +850,7 @@ def get_live_trace_explanation(code_str: str, trace_input: str) -> str:
         sys.settrace(None)
         trace_report = f"Trace execution failed: {exc}"
 
-    trace_model = _build_model(TRACE_SYSTEM_INSTRUCTION)
-    chat_session = trace_model.start_chat(history=[])
+    trace_model = _build_model()
     prompt = (
         "Source Code:\n\n```python\n"
         f"{code_str}\n"
@@ -851,8 +858,8 @@ def get_live_trace_explanation(code_str: str, trace_input: str) -> str:
         f"{trace_report}\n"
         "```"
     )
-    response = chat_session.send_message(
-        prompt,
+    response = trace_model.generate_content(
+        _compose_prompt(TRACE_SYSTEM_INSTRUCTION, prompt),
         request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
