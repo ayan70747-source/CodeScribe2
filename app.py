@@ -277,6 +277,28 @@ def _is_auth_or_quota_error(message: str) -> bool:
     )
 
 
+def _call_with_timeout(func, timeout_sec=30):
+    """Call function with timeout using threading to prevent worker hangs."""
+    result = [None]
+    exception = [None]
+
+    def wrapper():
+        try:
+            result[0] = func()
+        except Exception as e:
+            exception[0] = e
+
+    thread = threading.Thread(target=wrapper, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_sec)
+
+    if thread.is_alive():
+        return None  # Timeout occurred
+    if exception[0]:
+        raise exception[0]
+    return result[0]
+
+
 def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
     """Call Gemini across SDK versions with graceful fallback for request options."""
     if not api_key:
@@ -287,7 +309,18 @@ def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
         )
 
     try:
-        return model.generate_content(prompt)
+        # Wrap API call with timeout to prevent worker process hangs
+        result = _call_with_timeout(
+            lambda: model.generate_content(prompt),
+            timeout_sec=MODEL_TIMEOUT_SECONDS
+        )
+        if result is None:
+            raise TimeoutError(f"Gemini API call timeout after {MODEL_TIMEOUT_SECONDS}s")
+        return result
+    except TimeoutError as timeout_exc:
+        if DEMO_MODE:
+            return _FallbackResponse(_demo_mode_markdown())
+        raise LLMServiceError(f"API request timed out: {str(timeout_exc)}") from timeout_exc
     except Exception as exc:
         message = str(exc)
         if (
@@ -302,13 +335,14 @@ def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
                 try:
                     fallback_model = _build_model(candidate)
                     try:
-                        return fallback_model.generate_content(
-                            prompt,
-                            request_options={"timeout": MODEL_TIMEOUT_SECONDS},
+                        result = _call_with_timeout(
+                            lambda: fallback_model.generate_content(prompt),
+                            timeout_sec=MODEL_TIMEOUT_SECONDS
                         )
-                    except Exception as nested:
-                        if "Unknown field for GenerateContentRequest: request_options" in str(nested):
-                            return fallback_model.generate_content(prompt)
+                        if result is not None:
+                            return result
+                    except Exception:
+                        pass
                 except Exception:
                     continue
         if _is_auth_or_quota_error(message):
