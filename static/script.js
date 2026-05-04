@@ -743,7 +743,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ code, trace_input: traceSnippet })
-            });
+            }, 90000);
 
             if (!response.ok) {
                 const message = payload.error || 'The server returned an error.';

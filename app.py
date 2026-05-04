@@ -56,8 +56,52 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
 ]
-MODEL_NAME = 'gemini-2.5-flash-preview-09-2025'
+MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-2.5-flash-preview-09-2025')
 MODEL_TIMEOUT_SECONDS = int(os.getenv('MODEL_TIMEOUT_SECONDS', '60'))
+
+MODEL_FALLBACK_CANDIDATES = [
+    MODEL_NAME,
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash',
+]
+
+
+def _normalize_model_name(name: str) -> str:
+    return name.replace('models/', '').strip()
+
+
+def _resolve_model_name() -> str:
+    """Pick the first configured candidate supported by generateContent."""
+    setup_logger = logging.getLogger('codescribe')
+    candidates = [_normalize_model_name(item) for item in MODEL_FALLBACK_CANDIDATES if item and item.strip()]
+    unique_candidates = list(dict.fromkeys(candidates))
+
+    try:
+        available = {}
+        for model in genai.list_models():
+            model_name = _normalize_model_name(getattr(model, 'name', ''))
+            methods = set(getattr(model, 'supported_generation_methods', []) or [])
+            available[model_name] = methods
+
+        for candidate in unique_candidates:
+            methods = available.get(candidate)
+            if methods and 'generateContent' in methods:
+                setup_logger.info('Using Gemini model: %s', candidate)
+                return candidate
+
+        setup_logger.warning(
+            'No configured model candidate supports generateContent. Falling back to %s.',
+            unique_candidates[-1],
+        )
+        return unique_candidates[-1]
+    except Exception as exc:
+        setup_logger.warning('Could not list Gemini models (%s). Using configured model %s.', exc, unique_candidates[0])
+        return unique_candidates[0]
+
+
+ACTIVE_MODEL_NAME = _resolve_model_name()
 
 logging.basicConfig(
     level=os.getenv('LOG_LEVEL', 'INFO').upper(),
@@ -169,10 +213,10 @@ Respond in Markdown under a "### Database Report" heading and keep each query se
 """
 
 
-def _build_model() -> genai.GenerativeModel:
+def _build_model(model_name: str | None = None) -> genai.GenerativeModel:
     """Create a Gemini model instance with the shared configuration."""
     return genai.GenerativeModel(
-        MODEL_NAME,
+        model_name or ACTIVE_MODEL_NAME,
         generation_config=GENERATION_CONFIG,
         safety_settings=SAFETY_SETTINGS,
     )
@@ -184,6 +228,37 @@ def _compose_prompt(system_instruction: str, user_prompt: str) -> str:
         f"System instruction:\n{system_instruction.strip()}\n\n"
         f"User request:\n{user_prompt.strip()}"
     )
+
+
+def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
+    """Call Gemini across SDK versions with graceful fallback for request options."""
+    try:
+        return model.generate_content(
+            prompt,
+            request_options={"timeout": MODEL_TIMEOUT_SECONDS},
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "Unknown field for GenerateContentRequest: request_options" in message:
+            return model.generate_content(prompt)
+        if "is not found for API version" in message or "not supported for generateContent" in message:
+            for fallback in MODEL_FALLBACK_CANDIDATES:
+                candidate = _normalize_model_name(fallback)
+                if not candidate or candidate == ACTIVE_MODEL_NAME:
+                    continue
+                try:
+                    fallback_model = _build_model(candidate)
+                    try:
+                        return fallback_model.generate_content(
+                            prompt,
+                            request_options={"timeout": MODEL_TIMEOUT_SECONDS},
+                        )
+                    except Exception as nested:
+                        if "Unknown field for GenerateContentRequest: request_options" in str(nested):
+                            return fallback_model.generate_content(prompt)
+                except Exception:
+                    continue
+        raise
 
 app = Flask(__name__)
 
@@ -377,14 +452,14 @@ def index():
 def get_ai_documentation(code_str: str) -> str:
     """Send the user's code to the documentataion files."""
     doc_model = _build_model()
-    response = doc_model.generate_content(
+    response = _generate_with_compat(
+        doc_model,
         _compose_prompt(
             DOC_SYSTEM_INSTRUCTION,
             f"""Here is the code:\n\n```
 {code_str}
 ```"""
         ),
-        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -392,14 +467,14 @@ def get_ai_documentation(code_str: str) -> str:
 def get_ai_security_audit(code_str: str) -> str:
     """Run the security audit persona against the provided source code."""
     audit_model = _build_model()
-    response = audit_model.generate_content(
+    response = _generate_with_compat(
+        audit_model,
         _compose_prompt(
             AUDIT_SYSTEM_INSTRUCTION,
             f"""Audit the following code:\n\n```
 {code_str}
 ```"""
         ),
-        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -415,9 +490,9 @@ def get_ai_refactor(code_str: str, vulnerability_context: str) -> str:
         "```\n\nVulnerability Context:\n"
         f"{vulnerability_context}"
     )
-    response = refactor_model.generate_content(
+    response = _generate_with_compat(
+        refactor_model,
         _compose_prompt(REFACTOR_SYSTEM_INSTRUCTION, prompt),
-        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -563,9 +638,9 @@ def get_ai_test_module(function_source: str, function_name: str) -> str:
         f"{function_source}\n"
         "```"
     )
-    response = test_model.generate_content(
+    response = _generate_with_compat(
+        test_model,
         _compose_prompt(TEST_GEN_SYSTEM_INSTRUCTION, prompt),
-        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -573,13 +648,13 @@ def get_ai_test_module(function_source: str, function_name: str) -> str:
 def get_ai_project_overview(project_code: str) -> str:
     """Summarize an entire project using the Architect persona."""
     architect_model = _build_model()
-    response = architect_model.generate_content(
+    response = _generate_with_compat(
+        architect_model,
         _compose_prompt(
             ARCHITECT_SYSTEM_INSTRUCTION,
             "Provide a project-wide architecture brief for the following source files:\n\n" +
             project_code,
         ),
-        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -647,9 +722,9 @@ def get_ai_database_report(sql_queries: list[str]) -> str:
 
     prompt = "\n\n".join(prompt_sections)
     dba_model = _build_model()
-    response = dba_model.generate_content(
+    response = _generate_with_compat(
+        dba_model,
         _compose_prompt(DBA_SYSTEM_INSTRUCTION, prompt),
-        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
@@ -858,9 +933,9 @@ def get_live_trace_explanation(code_str: str, trace_input: str) -> str:
         f"{trace_report}\n"
         "```"
     )
-    response = trace_model.generate_content(
+    response = _generate_with_compat(
+        trace_model,
         _compose_prompt(TRACE_SYSTEM_INSTRUCTION, prompt),
-        request_options={"timeout": MODEL_TIMEOUT_SECONDS},
     )
     return response.text
 
