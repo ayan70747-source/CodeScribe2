@@ -287,14 +287,9 @@ def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
         )
 
     try:
-        return model.generate_content(
-            prompt,
-            request_options={"timeout": MODEL_TIMEOUT_SECONDS},
-        )
+        return model.generate_content(prompt)
     except Exception as exc:
         message = str(exc)
-        if "Unknown field for GenerateContentRequest: request_options" in message:
-            return model.generate_content(prompt)
         if (
             "is not found for API version" in message
             or "not supported for generateContent" in message
