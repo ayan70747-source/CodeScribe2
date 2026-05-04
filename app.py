@@ -38,6 +38,7 @@ from werkzeug.security import check_password_hash
 # --- Load API Key ---
 load_dotenv()
 api_key = os.getenv('GEMINI_API_KEY')
+DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 if api_key:
     genai.configure(api_key=api_key)
 else:
@@ -57,14 +58,15 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
 ]
-MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-2.5-flash-preview-09-2025')
+MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-2.5-flash')
 MODEL_TIMEOUT_SECONDS = int(os.getenv('MODEL_TIMEOUT_SECONDS', '60'))
 
 MODEL_FALLBACK_CANDIDATES = [
     MODEL_NAME,
     'gemini-2.5-flash',
-    'gemini-2.0-flash',
+    'gemini-2.5-pro',
     'gemini-1.5-flash-latest',
+    'gemini-1.5-pro-latest',
     'gemini-1.5-flash',
 ]
 
@@ -98,8 +100,13 @@ def _resolve_model_name() -> str:
         )
         return unique_candidates[-1]
     except Exception as exc:
-        setup_logger.warning('Could not list Gemini models (%s). Using configured model %s.', exc, unique_candidates[0])
-        return unique_candidates[0]
+        # Prefer stable non-preview candidates when list_models cannot be queried.
+        stable_fallback = next(
+            (name for name in unique_candidates if 'preview' not in name.lower()),
+            unique_candidates[0],
+        )
+        setup_logger.warning('Could not list Gemini models (%s). Using fallback model %s.', exc, stable_fallback)
+        return stable_fallback
 
 
 ACTIVE_MODEL_NAME = _resolve_model_name()
@@ -231,8 +238,54 @@ def _compose_prompt(system_instruction: str, user_prompt: str) -> str:
     )
 
 
+class LLMServiceError(RuntimeError):
+    """Raised when the managed LLM backend is not available for a request."""
+
+
+class _FallbackResponse:
+    """Simple response wrapper used for demo-mode fallback responses."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _demo_mode_markdown() -> str:
+    """Return deterministic markdown when demo mode is enabled without a key."""
+    return (
+        "### Demo Mode Response\n"
+        "AI output is currently running in demo mode for evaluation.\n\n"
+        "- A valid `GEMINI_API_KEY` is required for full-quality generated output.\n"
+        "- Core app features (auth, upload, routing, metrics, and analysis pipeline) are available for testing.\n"
+        "- To switch to live AI output, set `GEMINI_API_KEY` and keep `DEMO_MODE=false`.\n"
+    )
+
+
+def _is_auth_or_quota_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        token in lowered
+        for token in (
+            "api key",
+            "permission_denied",
+            "invalid api key",
+            "quota",
+            "resource_exhausted",
+            "403",
+            "401",
+            "leaked",
+        )
+    )
+
+
 def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
     """Call Gemini across SDK versions with graceful fallback for request options."""
+    if not api_key:
+        if DEMO_MODE:
+            return _FallbackResponse(_demo_mode_markdown())
+        raise LLMServiceError(
+            "AI service is not configured. Set GEMINI_API_KEY in server environment variables."
+        )
+
     try:
         return model.generate_content(
             prompt,
@@ -242,7 +295,11 @@ def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
         message = str(exc)
         if "Unknown field for GenerateContentRequest: request_options" in message:
             return model.generate_content(prompt)
-        if "is not found for API version" in message or "not supported for generateContent" in message:
+        if (
+            "is not found for API version" in message
+            or "not supported for generateContent" in message
+            or "no longer available to new users" in message
+        ):
             for fallback in MODEL_FALLBACK_CANDIDATES:
                 candidate = _normalize_model_name(fallback)
                 if not candidate or candidate == ACTIVE_MODEL_NAME:
@@ -259,6 +316,12 @@ def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
                             return fallback_model.generate_content(prompt)
                 except Exception:
                     continue
+        if _is_auth_or_quota_error(message):
+            if DEMO_MODE:
+                return _FallbackResponse(_demo_mode_markdown())
+            raise LLMServiceError(
+                "AI service authentication failed. Update GEMINI_API_KEY on the deployment host."
+            ) from exc
         raise
 
 app = Flask(__name__)
@@ -1005,9 +1068,13 @@ def healthz():
 @app.route('/readyz')
 def readyz():
     """Return readiness based on required runtime configuration."""
-    ready = bool(api_key and app.secret_key and admin_username and admin_password_hash)
+    ready = bool((api_key or DEMO_MODE) and app.secret_key and admin_username and admin_password_hash)
     status_code = 200 if ready else 503
-    return jsonify({"ready": ready}), status_code
+    return jsonify({
+        "ready": ready,
+        "demo_mode": DEMO_MODE,
+        "ai_configured": bool(api_key),
+    }), status_code
 
 
 @app.route('/about')
@@ -1035,6 +1102,8 @@ def analyze_all():
 
         results = run_analysis_pipeline(code, trace_input)
         return jsonify(results)
+    except LLMServiceError as exc:
+        return jsonify({"error": str(exc)}), 503
     except Exception:
         logger.exception("Analyze-all failed")
         return jsonify({"error": "An internal error occurred."}), 500
@@ -1151,6 +1220,8 @@ def upload_zip_endpoint():
             "database_report": sql_report,
         }
         return jsonify(payload)
+    except LLMServiceError as exc:
+        return jsonify({"error": str(exc)}), 503
     except zipfile.BadZipFile:
         return jsonify({"error": "The uploaded file is not a valid zip archive."}), 400
     except ValueError as exc:
@@ -1184,6 +1255,8 @@ def refactor_code():
             return jsonify({"error": str(exc)}), 400
 
         return jsonify({"refactored_code": refactored})
+    except LLMServiceError as exc:
+        return jsonify({"error": str(exc)}), 503
     except Exception:
         logger.exception("Refactor request failed")
         return jsonify({"error": "An internal error occurred."}), 500
@@ -1213,6 +1286,8 @@ def generate_test():
         return jsonify({"test_code": test_module, "function_source": function_source})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except LLMServiceError as exc:
+        return jsonify({"error": str(exc)}), 503
     except Exception:
         logger.exception("Test generation failed")
         return jsonify({"error": "An internal error occurred."}), 500

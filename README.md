@@ -132,11 +132,38 @@ The application uses the following environment variables:
 | `APP_ADMIN_ROLE` | Role assigned to the configured admin user |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origin allowlist |
 | `MODEL_TIMEOUT_SECONDS` | Timeout in seconds for model requests |
+| `DEMO_MODE` | Set `true` to return deterministic demo responses when AI backend is unavailable |
 | `FLASK_DEBUG` | Enables Flask debug mode when true |
 | `PORT` | Application port |
 | `SESSION_COOKIE_SECURE` | Secure-cookie flag for HTTPS environments |
 | `MAX_FAILED_LOGINS` | Failed attempts before lockout |
 | `LOCKOUT_SECONDS` | Lockout duration after threshold is reached |
+
+## Professor Evaluation Setup
+
+Use this flow so your professor can test with just a public URL and no personal API key.
+
+1. Deploy the app to Railway/Render using `gunicorn app:app`.
+2. Set environment variables on the host:
+   - `GEMINI_API_KEY=<your-evaluation-key>`
+   - `FLASK_SECRET_KEY=<long-random-secret>`
+   - `APP_ADMIN_USERNAME=<shared-eval-username>`
+   - `APP_ADMIN_PASSWORD_HASH=<werkzeug-hash>`
+   - `SESSION_COOKIE_SECURE=true`
+   - `CORS_ALLOWED_ORIGINS=<your-public-app-url>`
+   - `DEMO_MODE=false`
+3. Share only the app URL and login credentials with your professor.
+
+Recommended safety for evaluation keys:
+
+- Create a dedicated short-lived key for the project demo.
+- Set billing/quota alerts in Google Cloud.
+- Revoke or rotate the key after grading.
+
+Optional fallback for offline/demo-only grading:
+
+- Set `DEMO_MODE=true` and unset `GEMINI_API_KEY`.
+- The app remains testable end-to-end, but responses are deterministic demo text instead of live AI output.
 
 ## Testing and CI
 
