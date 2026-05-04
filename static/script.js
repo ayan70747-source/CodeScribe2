@@ -542,6 +542,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const { svg } = await mermaid.render(uniqueId, mermaidDefinition);
                 setSafeHtml(visualizerOutput, svg, {
                     USE_PROFILES: { svg: true, svgFilters: true },
+                    ADD_TAGS: ['foreignObject', 'div', 'span', 'p', 'br'],
+                    ADD_ATTR: ['xmlns', 'dominant-baseline', 'text-anchor', 'style', 'class'],
                 });
                 applyVisualizerZoom();
                 return;
@@ -575,6 +577,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const { svg } = await mermaid.render(uniqueId, mermaidDefinition);
                 setSafeHtml(visualizerOutput, svg, {
                     USE_PROFILES: { svg: true, svgFilters: true },
+                    ADD_TAGS: ['foreignObject', 'div', 'span', 'p', 'br'],
+                    ADD_ATTR: ['xmlns', 'dominant-baseline', 'text-anchor', 'style', 'class'],
                 });
                 applyVisualizerZoom();
             } catch (error) {
