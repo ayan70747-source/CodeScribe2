@@ -322,7 +322,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 ...init,
                 signal: controller.signal,
             });
-            const payload = await response.json();
+            let payload = {};
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                payload = await response.json();
+            } else {
+                const text = await response.text();
+                payload = { error: text || 'Unexpected non-JSON response from server.' };
+            }
             return { response, payload };
         } finally {
             clearTimeout(timeoutId);
@@ -743,7 +750,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ code, trace_input: traceSnippet })
-            }, 90000);
+            }, 180000);
 
             if (!response.ok) {
                 const message = payload.error || 'The server returned an error.';
@@ -762,7 +769,11 @@ document.addEventListener('DOMContentLoaded', () => {
             setWorkflowStep('review');
         } catch (error) {
             console.error('Fetch Error:', error);
-            showStateCard(docOutput, 'error', 'An error occurred', 'Check console logs and retry.');
+            const timeoutMessage = 'Request timed out. Try Analyze Async for long AI runs.';
+            const detail = error && error.name === 'AbortError'
+                ? timeoutMessage
+                : (error && error.message ? error.message : 'Check console logs and retry.');
+            showStateCard(docOutput, 'error', 'An error occurred', detail);
             showStateCard(auditOutput, 'empty', 'No audit output', 'No content available.');
             showStateCard(traceOutput, 'empty', 'No trace output', 'No content available.');
             showStateCard(visualizerOutput, 'empty', 'No visualizer output', 'No content available.');
