@@ -51,7 +51,7 @@ GENERATION_CONFIG = {
     "temperature": 0.3,
     "top_p": 0.95,
     "top_k": 64,
-    "max_output_tokens": 8192,
+    "max_output_tokens": 2048,
 }
 SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
@@ -1055,7 +1055,14 @@ def run_analysis_pipeline(code: str, trace_input: str) -> dict[str, object]:
         except Exception as exc:
             results['audit'] = f"Security audit failed: {exc}"
 
-    results['visualizer'] = generate_visualizer_graph(code)
+    try:
+        results['visualizer'] = generate_visualizer_graph(code)
+    except Exception as exc:
+        results['visualizer'] = {
+            "mermaid": "",
+            "graphviz": "",
+            "error": f"Visualizer generation failed: {exc}",
+        }
 
     if trace_input:
         if budget_exhausted():
@@ -1146,10 +1153,31 @@ def analyze_all():
         results = run_analysis_pipeline(code, trace_input)
         return jsonify(results)
     except LLMServiceError as exc:
-        return jsonify({"error": str(exc)}), 503
-    except Exception:
+        # Return partial-friendly payload to keep UI responsive during provider outages.
+        return jsonify({
+            "documentation": f"Documentation generation failed: {exc}",
+            "audit": f"Security audit failed: {exc}",
+            "trace": f"Live trace explanation failed: {exc}",
+            "database_report": f"Database analysis failed: {exc}",
+            "visualizer": {
+                "mermaid": "graph TD\nplaceholder[\"Analysis unavailable\"]",
+                "graphviz": "",
+                "error": "Visualizer unavailable while AI service is degraded.",
+            },
+        }), 200
+    except Exception as exc:
         logger.exception("Analyze-all failed")
-        return jsonify({"error": "An internal error occurred."}), 500
+        return jsonify({
+            "documentation": f"Documentation generation failed: {exc}",
+            "audit": f"Security audit failed: {exc}",
+            "trace": f"Live trace explanation failed: {exc}",
+            "database_report": f"Database analysis failed: {exc}",
+            "visualizer": {
+                "mermaid": "graph TD\nplaceholder[\"Analysis unavailable\"]",
+                "graphviz": "",
+                "error": "Visualizer unavailable due to server error.",
+            },
+        }), 200
 
 
 @app.route('/v1/jobs/analyze', methods=['POST'])
