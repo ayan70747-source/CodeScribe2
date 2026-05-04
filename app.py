@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import sys
 import shutil
 import tempfile
@@ -279,25 +280,26 @@ def _is_auth_or_quota_error(message: str) -> bool:
 
 
 def _call_with_timeout(func, timeout_sec=30):
-    """Call function with timeout using threading to prevent worker hangs."""
-    result = [None]
-    exception = [None]
+    """Call function with a hard timeout without spawning extra worker threads."""
+    timeout_sec = int(timeout_sec or 0)
+    if timeout_sec <= 0:
+        return func()
 
-    def wrapper():
-        try:
-            result[0] = func()
-        except Exception as e:
-            exception[0] = e
+    # signal-based timeouts are only safe in the main thread on Unix.
+    if os.name == "nt" or threading.current_thread() is not threading.main_thread():
+        return func()
 
-    thread = threading.Thread(target=wrapper, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout_sec)
+    def _timeout_handler(signum, frame):
+        raise TimeoutError(f"Gemini API call timeout after {timeout_sec}s")
 
-    if thread.is_alive():
-        return None  # Timeout occurred
-    if exception[0]:
-        raise exception[0]
-    return result[0]
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_sec)
+    try:
+        return func()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
@@ -310,14 +312,11 @@ def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
         )
 
     try:
-        # Wrap API call with timeout to prevent worker process hangs
-        result = _call_with_timeout(
+        # Hard-time-limit each model call to keep requests bounded.
+        return _call_with_timeout(
             lambda: model.generate_content(prompt),
             timeout_sec=MODEL_TIMEOUT_SECONDS
         )
-        if result is None:
-            raise TimeoutError(f"Gemini API call timeout after {MODEL_TIMEOUT_SECONDS}s")
-        return result
     except TimeoutError as timeout_exc:
         if DEMO_MODE:
             return _FallbackResponse(_demo_mode_markdown())
@@ -336,12 +335,10 @@ def _generate_with_compat(model: genai.GenerativeModel, prompt: str):
                 try:
                     fallback_model = _build_model(candidate)
                     try:
-                        result = _call_with_timeout(
+                        return _call_with_timeout(
                             lambda: fallback_model.generate_content(prompt),
                             timeout_sec=MODEL_TIMEOUT_SECONDS
                         )
-                        if result is not None:
-                            return result
                     except Exception:
                         pass
                 except Exception:
