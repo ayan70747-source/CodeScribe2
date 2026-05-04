@@ -38,10 +38,11 @@ from werkzeug.security import check_password_hash
 # --- Load API Key ---
 load_dotenv()
 api_key = os.getenv('GEMINI_API_KEY')
-if not api_key:
-    raise ValueError("GEMINI_API_KEY not found. Make sure it's in your .env file.")
-
-genai.configure(api_key=api_key)
+if api_key:
+    genai.configure(api_key=api_key)
+else:
+    # Allow startup for deployment inspection, will error at runtime if key not set
+    logging.warning("GEMINI_API_KEY not found. API calls will fail until this is configured in environment.")
 
 # --- Gemini Model Configuration ---
 GENERATION_CONFIG = {
