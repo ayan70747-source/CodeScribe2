@@ -59,7 +59,8 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
 ]
 MODEL_NAME = os.getenv('MODEL_NAME', 'gemini-2.5-flash')
-MODEL_TIMEOUT_SECONDS = int(os.getenv('MODEL_TIMEOUT_SECONDS', '60'))
+MODEL_TIMEOUT_SECONDS = max(8, min(int(os.getenv('MODEL_TIMEOUT_SECONDS', '25')), 45))
+ANALYSIS_PIPELINE_TIMEOUT_SECONDS = max(30, min(int(os.getenv('ANALYSIS_PIPELINE_TIMEOUT_SECONDS', '100')), 240))
 
 MODEL_FALLBACK_CANDIDATES = [
     MODEL_NAME,
@@ -1036,33 +1037,49 @@ def get_live_trace_explanation(code_str: str, trace_input: str) -> str:
 def run_analysis_pipeline(code: str, trace_input: str) -> dict[str, object]:
     """Run the full analysis pipeline and return the unified response payload."""
     results: dict[str, object] = {}
+    deadline = time.time() + ANALYSIS_PIPELINE_TIMEOUT_SECONDS
 
-    try:
-        results['documentation'] = get_ai_documentation(code)
-    except Exception as exc:
-        results['documentation'] = f"Documentation generation failed: {exc}"
+    def budget_exhausted() -> bool:
+        return time.time() >= deadline
 
-    try:
-        results['audit'] = get_ai_security_audit(code)
-    except Exception as exc:
-        results['audit'] = f"Security audit failed: {exc}"
+    if budget_exhausted():
+        results['documentation'] = "Documentation skipped: analysis time budget exhausted."
+    else:
+        try:
+            results['documentation'] = get_ai_documentation(code)
+        except Exception as exc:
+            results['documentation'] = f"Documentation generation failed: {exc}"
+
+    if budget_exhausted():
+        results['audit'] = "Security audit skipped: analysis time budget exhausted."
+    else:
+        try:
+            results['audit'] = get_ai_security_audit(code)
+        except Exception as exc:
+            results['audit'] = f"Security audit failed: {exc}"
 
     results['visualizer'] = generate_visualizer_graph(code)
 
     if trace_input:
-        try:
-            results['trace'] = get_live_trace_explanation(code, trace_input)
-        except Exception as exc:
-            results['trace'] = f"Live trace explanation failed: {exc}"
+        if budget_exhausted():
+            results['trace'] = "Live trace skipped: analysis time budget exhausted."
+        else:
+            try:
+                results['trace'] = get_live_trace_explanation(code, trace_input)
+            except Exception as exc:
+                results['trace'] = f"Live trace explanation failed: {exc}"
     else:
         results['trace'] = "Please provide a sample input to run the Live Trace."
 
     sql_queries = extract_sql_queries(code)
     if sql_queries:
-        try:
-            results['database_report'] = get_ai_database_report(sql_queries)
-        except Exception as exc:
-            results['database_report'] = f"Database analysis failed: {exc}"
+        if budget_exhausted():
+            results['database_report'] = "Database analysis skipped: analysis time budget exhausted."
+        else:
+            try:
+                results['database_report'] = get_ai_database_report(sql_queries)
+            except Exception as exc:
+                results['database_report'] = f"Database analysis failed: {exc}"
     else:
         results['database_report'] = "No SQL queries detected in the provided code."
 
